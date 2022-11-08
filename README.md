@@ -3,13 +3,13 @@ mt4/mt5 黄金自动量化交易EA，高频交易单单清，没有浮亏
 
 
 
-![image-20221109000345204](C:\Users\Administrator\AppData\Roaming\Typora\typora-user-images\image-20221109000345204.png)
+![image-20221109000345204](images\image-20221109000345204.png)
 
 
 
 参数说明：
 
-![image-20221109001416765](C:\Users\Administrator\AppData\Roaming\Typora\typora-user-images\image-20221109001416765.png)
+![image-20221109001416765](images\image-20221109001416765.png)
 
 
 
