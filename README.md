@@ -1,15 +1,15 @@
 # Easy-Deal
 mt4/mt5 黄金自动量化交易EA，高频交易单单清，没有浮亏
 
-
-
-![image-20221109000345204](images\image-20221109000345204.png)
+<img src="images\image-20221109000345204.png" alt="ed">
 
 
 
 参数说明：
 
-![image-20221109001416765](images\image-20221109001416765.png)
+<img src="images\image-20221109001416765.png" alt="ed">
+
+
 
 
 
