@@ -1,4 +1,4 @@
-# Easy-Deal
+# Easy-Deal(后续升级将转到gitee)
 mt4/mt5 黄金自动量化交易EA，高频交易单单清，没有浮亏
 
 <img src="images\image-20221109000345204.png" alt="ed">
