@@ -79,7 +79,13 @@ class EasyDealStrategy:
         self.magic_number = 999  # 魔术数字
         self.max_loss = 3000  # 最大亏损
         self.max_martin_level = 5  # 最大马丁层数
-        
+
+        # 马丁控制参数
+        self.martin_enabled = True  # 马丁开关（可由MCP控制）
+        self.max_atr_pct = 1.5  # ATR%超过此值暂停马丁
+        self.max_boll_deviation = 2.0  # 价格偏离布林带中轨超过N倍标准差时暂停马丁
+        self.martin_pause_reason = None  # 马丁暂停原因
+
         # 设置有效期（可选）
         self.expiry_date = None
         self.running = True
@@ -261,8 +267,10 @@ class EasyDealStrategy:
             })
             
             if buy_order.retcode != mt5.TRADE_RETCODE_DONE or sell_order.retcode != mt5.TRADE_RETCODE_DONE:
-                self.running = False
-                logging.error(f"{self.get_market_info()} 下单失败，错误代码: {buy_order.retcode}, {sell_order.retcode}")
+                logging.error(f"{self.get_market_info()} 下单失败，错误代码: {buy_order.retcode}, {sell_order.retcode}，1800秒后重试")
+                self.is_follow = False  # 重置状态，下次循环重新尝试
+                time.sleep(1800)  # 等待1800秒(30分钟)后重试
+                return
             else:
                 logging.info(f"{self.get_market_info()} 双向开仓成功")
                 self.last_buy_ticket = buy_order.order
@@ -420,8 +428,15 @@ class EasyDealStrategy:
             if buy_pos and sell_pos:
                 buy_profit_percent = (symbol_info.bid - buy_pos[0].price_open) / buy_pos[0].price_open * 100
                 sell_profit_percent = (sell_pos[0].price_open - symbol_info.ask) / sell_pos[0].price_open * 100
-                
+
                 if buy_profit_percent <= -self.filter and sell_profit_percent <= -self.martin_interval:
+                    # 检查马丁条件
+                    martin_allowed, pause_reason = self.check_martin_conditions()
+                    if not martin_allowed:
+                        self.martin_pause_reason = pause_reason
+                        if self.seek == 0:  # 只在第一次记录日志，避免刷屏
+                            logging.warning(f"{self.get_market_info()} 马丁暂停: {pause_reason}")
+                        return
                     # 记录当前sell单为马丁单
                     self.martin_orders.append(self.last_sell_ticket)
                     self.seek += 1
@@ -481,8 +496,15 @@ class EasyDealStrategy:
             if buy_pos and sell_pos:
                 buy_profit_percent = (symbol_info.bid - buy_pos[0].price_open) / buy_pos[0].price_open * 100
                 sell_profit_percent = (sell_pos[0].price_open - symbol_info.ask) / sell_pos[0].price_open * 100
-                
+
                 if sell_profit_percent <= -self.filter and buy_profit_percent <= -self.martin_interval:
+                    # 检查马丁条件
+                    martin_allowed, pause_reason = self.check_martin_conditions()
+                    if not martin_allowed:
+                        self.martin_pause_reason = pause_reason
+                        if self.seek == 0:  # 只在第一次记录日志，避免刷屏
+                            logging.warning(f"{self.get_market_info()} 马丁暂停: {pause_reason}")
+                        return
                     # 记录当前buy单为马丁单
                     self.martin_orders.append(self.last_buy_ticket)
                     self.seek += 1
@@ -675,7 +697,7 @@ class EasyDealStrategy:
         if positions is None:
             logging.error("无法获取持仓信息")
             return
-            
+
         # 统计当前订单
         buy_orders = []
         sell_orders = []
@@ -685,14 +707,14 @@ class EasyDealStrategy:
                     buy_orders.append(pos)
                 else:
                     sell_orders.append(pos)
-                    
+
         order_count = len(buy_orders) + len(sell_orders)
         logging.info(f"\n{'='*50}")
         logging.info("重新载入策略 - 状态数据:")
         logging.info(f"总订单数: {order_count}")
         logging.info(f"Buy订单数: {len(buy_orders)}")
         logging.info(f"Sell订单数: {len(sell_orders)}")
-        
+
         if order_count == 0:
             # 没有订单，重置状态
             self.is_open_position = False
@@ -706,7 +728,7 @@ class EasyDealStrategy:
             self.seek = 0
             self.running = True
             logging.info("\n状态已重置为初始状态")
-            
+
         elif order_count == 2 and len(buy_orders) == 1 and len(sell_orders) == 1:
             # 基础双向订单
             self.last_buy_ticket = buy_orders[0].ticket
@@ -722,85 +744,132 @@ class EasyDealStrategy:
             logging.info("\n基础双向订单状态:")
             logging.info(f"Buy订单: #{self.last_buy_ticket} 仓位:{buy_orders[0].volume:.2f} 利润:{buy_orders[0].profit:.2f}")
             logging.info(f"Sell订单: #{self.last_sell_ticket} 仓位:{sell_orders[0].volume:.2f} 利润:{sell_orders[0].profit:.2f}")
-            
-        elif order_count > 2 and order_count % 2 == 0:
-            # 有马丁订单的情况
+
+        elif order_count >= 2:
+            # 有马丁订单的情况 - 支持偶数和奇数订单数
             self.is_follow = False
             self.running = True
             self.is_open_position = True
-            
-            # 确定方向和马丁单
-            if len(sell_orders) > len(buy_orders) and len(buy_orders) == 1:
-                # 做多方向
+
+            # 按开仓时间排序
+            buy_orders.sort(key=lambda x: x.time)
+            sell_orders.sort(key=lambda x: x.time)
+
+            # 根据订单数量差异判断方向
+            if len(sell_orders) > len(buy_orders):
+                # 做多方向 (sell单多，说明在加sell马丁)
                 self.follow_type = mt5.ORDER_TYPE_BUY
-                self.seek = 0
-                self.last_buy_ticket = buy_orders[0].ticket
-                
-                # 按开仓时间排序
-                sell_orders.sort(key=lambda x: x.time)
-                self.last_sell_ticket = sell_orders[-1].ticket  # 最新的sell订单
-                self.last_martin_ticket = sell_orders[-2].ticket if len(sell_orders) > 1 else None
-                
-                # 记录马丁单
-                self.martin_orders = [order.ticket for order in sell_orders[:-1]]  # 除了最新的sell订单
+
+                if len(buy_orders) >= 1:
+                    self.last_buy_ticket = buy_orders[-1].ticket  # 最新的buy订单
+
+                if len(sell_orders) >= 1:
+                    self.last_sell_ticket = sell_orders[-1].ticket  # 最新的sell订单
+
+                # 除了最新的sell基础单，其他都是马丁单
+                if len(sell_orders) > 1:
+                    self.martin_orders = [order.ticket for order in sell_orders[:-1]]
+                    self.last_martin_ticket = self.martin_orders[-1] if self.martin_orders else None
+                else:
+                    self.martin_orders = []
+                    self.last_martin_ticket = None
+
                 self.seek = len(self.martin_orders)
-                
+
                 logging.info("\n做多方向状态:")
-                logging.info(f"主Buy订单: #{self.last_buy_ticket} 仓位:{buy_orders[0].volume:.2f} 利润:{buy_orders[0].profit:.2f}")
-                logging.info(f"基础Sell订单: #{self.last_sell_ticket} 仓位:{sell_orders[-1].volume:.2f} 利润:{sell_orders[-1].profit:.2f}")
-                if self.last_martin_ticket:
+                if buy_orders:
+                    logging.info(f"主Buy订单: #{self.last_buy_ticket} 仓位:{buy_orders[-1].volume:.2f} 利润:{buy_orders[-1].profit:.2f}")
+                if sell_orders:
+                    logging.info(f"基础Sell订单: #{self.last_sell_ticket} 仓位:{sell_orders[-1].volume:.2f} 利润:{sell_orders[-1].profit:.2f}")
+                if self.martin_orders:
                     logging.info("\nSell马丁单:")
                     total_martin_profit = 0
-                    for i, ticket in enumerate(self.martin_orders):
+                    for ticket in self.martin_orders:
                         order = next((o for o in sell_orders if o.ticket == ticket), None)
                         if order:
                             logging.info(f"  #{ticket} 仓位:{order.volume:.2f} 利润:{order.profit:.2f}")
                             total_martin_profit += order.profit
                     logging.info(f"马丁单总利润: {total_martin_profit:.2f}")
-                
-            elif len(buy_orders) > len(sell_orders) and len(sell_orders) == 1:
-                # 做空方向
+
+            elif len(buy_orders) > len(sell_orders):
+                # 做空方向 (buy单多，说明在加buy马丁)
                 self.follow_type = mt5.ORDER_TYPE_SELL
-                self.seek = 0
-                self.last_sell_ticket = sell_orders[0].ticket
-                
-                # 按开仓时间排序
-                buy_orders.sort(key=lambda x: x.time)
-                self.last_buy_ticket = buy_orders[-1].ticket  # 最新的buy订单
-                self.last_martin_ticket = buy_orders[-2].ticket if len(buy_orders) > 1 else None
-                
-                # 记录马丁单
-                self.martin_orders = [order.ticket for order in buy_orders[:-1]]  # 除了最新的buy订单
+
+                if len(sell_orders) >= 1:
+                    self.last_sell_ticket = sell_orders[-1].ticket  # 最新的sell订单
+
+                if len(buy_orders) >= 1:
+                    self.last_buy_ticket = buy_orders[-1].ticket  # 最新的buy订单
+
+                # 除了最新的buy基础单，其他都是马丁单
+                if len(buy_orders) > 1:
+                    self.martin_orders = [order.ticket for order in buy_orders[:-1]]
+                    self.last_martin_ticket = self.martin_orders[-1] if self.martin_orders else None
+                else:
+                    self.martin_orders = []
+                    self.last_martin_ticket = None
+
                 self.seek = len(self.martin_orders)
-                
+
                 logging.info("\n做空方向状态:")
-                logging.info(f"主Sell订单: #{self.last_sell_ticket} 仓位:{sell_orders[0].volume:.2f} 利润:{sell_orders[0].profit:.2f}")
-                logging.info(f"基础Buy订单: #{self.last_buy_ticket} 仓位:{buy_orders[-1].volume:.2f} 利润:{buy_orders[-1].profit:.2f}")
-                if self.last_martin_ticket:
+                if sell_orders:
+                    logging.info(f"主Sell订单: #{self.last_sell_ticket} 仓位:{sell_orders[-1].volume:.2f} 利润:{sell_orders[-1].profit:.2f}")
+                if buy_orders:
+                    logging.info(f"基础Buy订单: #{self.last_buy_ticket} 仓位:{buy_orders[-1].volume:.2f} 利润:{buy_orders[-1].profit:.2f}")
+                if self.martin_orders:
                     logging.info("\nBuy马丁单:")
                     total_martin_profit = 0
-                    for i, ticket in enumerate(self.martin_orders):
+                    for ticket in self.martin_orders:
                         order = next((o for o in buy_orders if o.ticket == ticket), None)
                         if order:
                             logging.info(f"  #{ticket} 仓位:{order.volume:.2f} 利润:{order.profit:.2f}")
                             total_martin_profit += order.profit
                     logging.info(f"马丁单总利润: {total_martin_profit:.2f}")
-                
+
+            else:
+                # buy和sell数量相等但大于1，可能是特殊状态
+                # 尝试根据手数判断方向
+                self.last_buy_ticket = buy_orders[-1].ticket
+                self.last_sell_ticket = sell_orders[-1].ticket
+
+                buy_total_volume = sum(o.volume for o in buy_orders)
+                sell_total_volume = sum(o.volume for o in sell_orders)
+
+                if sell_total_volume > buy_total_volume:
+                    # sell仓位大，做多方向
+                    self.follow_type = mt5.ORDER_TYPE_BUY
+                    self.martin_orders = [o.ticket for o in sell_orders[:-1]]
+                elif buy_total_volume > sell_total_volume:
+                    # buy仓位大，做空方向
+                    self.follow_type = mt5.ORDER_TYPE_SELL
+                    self.martin_orders = [o.ticket for o in buy_orders[:-1]]
+                else:
+                    # 仓位相等，无法确定方向，重置
+                    self.follow_type = None
+                    self.martin_orders = []
+
+                self.seek = len(self.martin_orders)
+                self.last_martin_ticket = self.martin_orders[-1] if self.martin_orders else None
+
+                logging.info("\n等量订单状态（根据仓位判断）:")
+                logging.info(f"Buy总仓位: {buy_total_volume:.2f}, Sell总仓位: {sell_total_volume:.2f}")
+                logging.info(f"判断方向: {'Buy' if self.follow_type == mt5.ORDER_TYPE_BUY else 'Sell' if self.follow_type == mt5.ORDER_TYPE_SELL else '未确定'}")
+
             logging.info(f"\n当前seek值: {self.seek}")
-            logging.info(f"交易方向: {'Buy' if self.follow_type == mt5.ORDER_TYPE_BUY else 'Sell'}")
-            
+            if self.follow_type:
+                logging.info(f"交易方向: {'Buy' if self.follow_type == mt5.ORDER_TYPE_BUY else 'Sell'}")
+
         else:
-            # 异常状态
+            # 只有1个订单的异常状态
             self.running = False
-            logging.error("\n订单状态异常，请手动处理")
-            logging.info(f"当前订单数: {order_count}")
+            logging.error("\n订单状态异常（仅1个订单），请手动处理")
             logging.info("Buy订单:")
             for order in buy_orders:
                 logging.info(f"  #{order.ticket} 仓位:{order.volume:.2f} 利润:{order.profit:.2f}")
             logging.info("Sell订单:")
             for order in sell_orders:
                 logging.info(f"  #{order.ticket} 仓位:{order.volume:.2f} 利润:{order.profit:.2f}")
-                
+
         logging.info(f"{'='*50}\n")
         
     def get_profit_history(self, start_time=None, end_time=None):
@@ -901,6 +970,105 @@ class EasyDealStrategy:
         if symbol_info:
             return f"[{self.symbol} Bid:{symbol_info.bid:.5f} Ask:{symbol_info.ask:.5f}]"
         return ""
+
+    def calculate_atr(self, period=14):
+        """计算ATR指标"""
+        rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_H1, 0, period + 1)
+        if rates is None or len(rates) < period + 1:
+            return None
+
+        tr_list = []
+        for i in range(1, len(rates)):
+            high = float(rates[i]['high'])
+            low = float(rates[i]['low'])
+            prev_close = float(rates[i-1]['close'])
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            tr_list.append(tr)
+
+        atr = sum(tr_list) / len(tr_list)
+        return atr
+
+    def calculate_bollinger(self, period=20, std_dev=2.0):
+        """计算布林带"""
+        rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_H1, 0, period)
+        if rates is None or len(rates) < period:
+            return None, None, None
+
+        closes = [float(r['close']) for r in rates]
+        middle = sum(closes) / period
+        variance = sum((x - middle) ** 2 for x in closes) / period
+        std = variance ** 0.5
+        upper = middle + std_dev * std
+        lower = middle - std_dev * std
+
+        return upper, middle, lower
+
+    def check_martin_conditions(self):
+        """检查是否允许开马丁单，返回 (allowed, reason)"""
+        # 检查手动开关
+        if not self.martin_enabled:
+            return False, "马丁已被手动禁用"
+
+        # 获取当前价格
+        symbol_info = mt5.symbol_info(self.symbol)
+        if symbol_info is None:
+            return False, "无法获取行情"
+        current_price = (symbol_info.bid + symbol_info.ask) / 2
+
+        # 检查ATR波动率
+        atr = self.calculate_atr()
+        if atr:
+            atr_pct = atr / current_price * 100
+            if atr_pct > self.max_atr_pct:
+                return False, f"ATR波动率过高({atr_pct:.2f}% > {self.max_atr_pct}%)"
+
+        # 检查布林带偏离
+        upper, middle, lower = self.calculate_bollinger()
+        if middle and upper and lower:
+            # 计算当前价格偏离中轨的标准差倍数
+            std = (upper - middle) / 2.0  # 布林带用2倍标准差
+            if std > 0:
+                deviation = abs(current_price - middle) / std
+                if deviation > self.max_boll_deviation:
+                    direction = "上方" if current_price > middle else "下方"
+                    return False, f"价格偏离布林带中轨过大({direction}{deviation:.2f}倍标准差)"
+
+        return True, None
+
+    def get_martin_status(self):
+        """获取马丁状态信息"""
+        allowed, reason = self.check_martin_conditions()
+
+        # 获取技术指标
+        atr = self.calculate_atr()
+        symbol_info = mt5.symbol_info(self.symbol)
+        current_price = (symbol_info.bid + symbol_info.ask) / 2 if symbol_info else 0
+        atr_pct = (atr / current_price * 100) if atr and current_price else 0
+
+        upper, middle, lower = self.calculate_bollinger()
+        boll_deviation = 0
+        if middle and upper:
+            std = (upper - middle) / 2.0
+            if std > 0:
+                boll_deviation = abs(current_price - middle) / std
+
+        return {
+            "martin_enabled": self.martin_enabled,
+            "martin_allowed": allowed,
+            "pause_reason": reason,
+            "current_seek": self.seek,
+            "max_martin_level": self.max_martin_level,
+            "indicators": {
+                "atr_pct": round(atr_pct, 4),
+                "max_atr_pct": self.max_atr_pct,
+                "boll_deviation": round(boll_deviation, 2),
+                "max_boll_deviation": self.max_boll_deviation,
+                "boll_upper": round(upper, 5) if upper else None,
+                "boll_middle": round(middle, 5) if middle else None,
+                "boll_lower": round(lower, 5) if lower else None,
+                "current_price": round(current_price, 5)
+            }
+        }
         
     def check_max_loss(self):
         """检查是否达到最大浮亏限制"""
