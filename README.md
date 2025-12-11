@@ -10,12 +10,12 @@ EasyDeal MT5是一个基于MetaTrader 5平台的自动化交易策略，支持 A
 
 - **双向开仓**：同时开立买单和卖单，捕捉市场双向机会
 - **马丁格尔策略**：合适的时机使用马丁来收窄锁定区间，降低浮亏
-- **风险控制**：设置最大亏损限制和最大马丁层数，防止过度亏损
+- **风险控制**：设置最大亏损限制和最大马丁层数，防止过度亏损，agent会视风险情况自动关闭马丁功能
 - **Web API接口**：提供完整的REST API，可远程监控和控制策略
 - **MCP Server**：支持 AI Agent 接入，实现智能化交易管理
 - **监控告警**：内置监控服务，支持 MACD/RSI/ATR/布林带 等技术指标告警
 - **日志记录**：详细记录交易和API请求，便于回测和分析
-- **复盘回测：**联系客服获取ea程序使用MT自带复盘功能进行回测
+- **复盘回测**：联系客服获取ea程序使用MT自带复盘功能进行回测
 
 ## 项目文件
 
@@ -36,7 +36,7 @@ easy-deal/
 
 ## 安装要求
 
-- Python 3.8+
+- Python 3.12
 - MetaTrader 5平台及其Python API
 - Windows 操作系统（MT5 限制）
 
@@ -57,27 +57,29 @@ pip install MetaTrader5 pandas flask pytz mcp requests
 ### 1. 准备工作
 
 - 开户及下载MT5（本文以exness为例）
-
+  
   - 访问exness官网（可能需要vpn，vpn不能使用美国、伊朗、朝鲜、欧盟、英国）：https://one.exnessonelink.com/a/r6fx3vgje1
+  
   - 点击右上角登录-->开立账户-->注册-->个人专区
+    
     - ![image-20251201164439332](image-20251201164439332.png)
-
+  
   - 我的账户-->模拟-->交易-->Meta Trader 5（此处保存好交易账号信息及服务器信息）-->下载安装MT5平台-->运行exness5setup.exe-->等待安装完成
+    
     - ![image-20251201164751516](image-20251201164751516.png)
     - ![image-20251201165907714](image-20251201165907714.png)
-
+  
   - 运行MT5终端-->关闭开设账户弹窗-->导航栏-->exness-->账户--右健-->登录到交易账户（注意，此处填写的登录名为上文选择mt5交易时记录的那串数字账号，服务器也需注意选择正确）
+    
     - ![image-20251201171300979](image-20251201171300979.png)
     - 主窗口交闭除XAUUSDm,H1 外的其他窗口，并全屏。（若关多了，可以在左则交易品种右键重新打开交易窗口）
       - ![image-20251201171802594](image-20251201171802594.png)
-
-  - 选择XAUUSDm窗口
-
   
+  - 选择XAUUSDm窗口
 
 ### 2. 配置参数
 
-在`easydeal_mt5.py`文件中，通过修改`EasyDealStrategy`类的`__init__`方法来配置交易参数：
+在`easydeal_mt5.py`文件中，通过修改`EasyDealStrategy`类的`__init__`方法来配置交易参数：（也可以让agent去更改）
 
 ```python
 def __init__(self):
@@ -93,6 +95,18 @@ def __init__(self):
     self.max_martin_level = 5  # 最大马丁层数
 ```
 
+| 参数名              | 说明            | 默认值    | 建议范围       |
+| ---------------- | ------------- | ------ | ---------- |
+| symbol           | 交易币对          | EURUSD | 任何MT5支持的币对 |
+| first_lots       | 首单手数          | 0.01   | 0.01-1.0   |
+| step             | 马丁加仓步长        | 0.1    | 0.1-0.5    |
+| martin_interval  | 马丁间隔（点数）      | 1.6    | 1.0-5.0    |
+| filter           | 过滤百分比         | 0.1    | 0.05-0.2   |
+| order_time       | 下单时间（0表示立即下单） | 0      | 0或Unix时间戳  |
+| magic_number     | 魔术数字（订单标识）    | 999    | 任意整数       |
+| max_loss         | 最大亏损限制（美元）    | 3000   | 根据资金量设置    |
+| max_martin_level | 最大马丁层数        | 5      | 3-10       |
+
 ### 3. 启动策略
 
 运行以下命令启动策略：
@@ -104,8 +118,6 @@ python easydeal_mt5.py
 启动后，策略将自动连接到MetaTrader 5平台，并开始监听8888端口的HTTP请求。
 需确保脚本运行机器和MetaTrader 5平台所在机器是同一台，并且已经打开了币对的交易窗口。
 
-
-
 ### 4. 启动监控
 
 运行以下命令启动策略：
@@ -116,35 +128,54 @@ python easydeal_monitor.py
 
 启动后，策略将自动监测风险情况。（下文详述）
 
-
-
 ### 5. 启动agent
 
 1、依照https://github.com/xszyou/fay安装并运行fay(记得star哦)
 
 ![image-20251201173550931](image-20251201173550931.png)
 
-2、在fay 界面配置上mcp服务器并连接
+2、在fay 界面配置上easy deal及window capture（为ea状态截图留底） mcp服务器
 
 ![image-20251201172558108](image-20251201172558108.png)
 
+```
+[
+    {
+        "id": 1,
+        "name": "easy deal",
+        "ip": "",
+        "connection_time": "2025-12-11 11:03:47",
+        "key": "",
+        "transport": "stdio",
+        "command": "python",
+        "args": [
+            "easydeal_mcp_server.py"
+        ],
+        "cwd": "mcp_servers/easy-deal",
+        "env": {}
+    },
+    {
+        "id": 2,
+        "name": "window capture",
+        "ip": "",
+        "connection_time": "2025-12-11 11:03:48",
+        "key": "",
+        "transport": "stdio",
+        "command": "python",
+        "args": [
+            "./mcp_servers/window_capture/server.py"
+        ],
+        "cwd": "",
+        "env": {}
+    }
+]
+```
 
+3、配置工具预启动
 
+easy deal ：get_strategy_documentation (防止ai幻觉)
 
-
-## 参数配置说明
-
-| 参数名 | 说明 | 默认值 | 建议范围 |
-|--------|------|--------|----------|
-| symbol | 交易币对 | EURUSD | 任何MT5支持的币对 |
-| first_lots | 首单手数 | 0.01 | 0.01-1.0 |
-| step | 马丁加仓步长 | 0.1 | 0.1-0.5 |
-| martin_interval | 马丁间隔（点数） | 1.6 | 1.0-5.0 |
-| filter | 过滤百分比 | 0.1 | 0.05-0.2 |
-| order_time | 下单时间（0表示立即下单） | 0 | 0或Unix时间戳 |
-| magic_number | 魔术数字（订单标识） | 999 | 任意整数 |
-| max_loss | 最大亏损限制（美元） | 3000 | 根据资金量设置 |
-| max_martin_level | 最大马丁层数 | 5 | 3-10 |
+window capture：capture_window （每次对话都会留存mt5截图）
 
 
 
@@ -216,10 +247,6 @@ GET /logs
 
 获取策略运行日志。
 
-
-
-
-
 ## MCP Server (AI Agent 接入)
 
 EasyDeal 提供了 MCP (Model Context Protocol) 服务器，允许 AI Agent 直接与交易策略进行交互。
@@ -249,50 +276,50 @@ pip install mcp
 
 #### 策略控制工具
 
-| 工具名称 | 描述 | 参数 |
-|---------|------|------|
-| `get_trading_status` | 获取当前交易策略的完整状态 | 无 |
-| `get_config` | 获取策略配置参数 | 无 |
-| `pause_strategy` | 暂停交易策略 | 无 |
-| `resume_strategy` | 恢复交易策略 | 无 |
-| `close_all_positions` | 平掉所有持仓 | `confirm`: bool (必须为true才执行) |
-| `get_profit_history` | 获取收益历史 | `days`: int (默认30) |
-| `get_logs` | 获取策略日志 | `lines`: int (默认100)<br>`level`: ALL/INFO/WARNING/ERROR<br>`log_type`: all/main/api |
-| `reload_strategy` | 重新加载策略 | 无 |
-| `analyze_risk` | 分析当前风险状况 | 无 |
-| `get_position_details` | 获取持仓详情 | 无 |
-| `update_config` | 更新策略参数 | `max_loss`: float<br>`max_martin_level`: int<br>`step`: float<br>`martin_interval`: float<br>`filter`: float |
+| 工具名称                   | 描述            | 参数                                                                                                           |
+| ---------------------- | ------------- | ------------------------------------------------------------------------------------------------------------ |
+| `get_trading_status`   | 获取当前交易策略的完整状态 | 无                                                                                                            |
+| `get_config`           | 获取策略配置参数      | 无                                                                                                            |
+| `pause_strategy`       | 暂停交易策略        | 无                                                                                                            |
+| `resume_strategy`      | 恢复交易策略        | 无                                                                                                            |
+| `close_all_positions`  | 平掉所有持仓        | `confirm`: bool (必须为true才执行)                                                                                 |
+| `get_profit_history`   | 获取收益历史        | `days`: int (默认30)                                                                                           |
+| `get_logs`             | 获取策略日志        | `lines`: int (默认100)<br>`level`: ALL/INFO/WARNING/ERROR<br>`log_type`: all/main/api                          |
+| `reload_strategy`      | 重新加载策略        | 无                                                                                                            |
+| `analyze_risk`         | 分析当前风险状况      | 无                                                                                                            |
+| `get_position_details` | 获取持仓详情        | 无                                                                                                            |
+| `update_config`        | 更新策略参数        | `max_loss`: float<br>`max_martin_level`: int<br>`step`: float<br>`martin_interval`: float<br>`filter`: float |
 
 #### 马丁控制工具
 
-| 工具名称 | 描述 | 参数 |
-|---------|------|------|
-| `get_martin_status` | 获取马丁状态、波动率指标 | 无 |
-| `enable_martin` | 启用马丁加仓功能 | 无 |
-| `disable_martin` | 禁用马丁加仓功能 | `reason`: string (禁用原因，可选) |
-| `update_martin_config` | 更新马丁控制参数 | `max_atr_pct`: float (ATR阈值)<br>`max_boll_deviation`: float (布林带偏离阈值) |
+| 工具名称                   | 描述           | 参数                                                                    |
+| ---------------------- | ------------ | --------------------------------------------------------------------- |
+| `get_martin_status`    | 获取马丁状态、波动率指标 | 无                                                                     |
+| `enable_martin`        | 启用马丁加仓功能     | 无                                                                     |
+| `disable_martin`       | 禁用马丁加仓功能     | `reason`: string (禁用原因，可选)                                            |
+| `update_martin_config` | 更新马丁控制参数     | `max_atr_pct`: float (ATR阈值)<br>`max_boll_deviation`: float (布林带偏离阈值) |
 
 #### 行情分析工具
 
-| 工具名称 | 描述 | 参数 |
-|---------|------|------|
-| `get_market_info` | 获取实时行情（Bid/Ask/Spread） | - |
-| `get_klines` | 获取K线数据 | `timeframe`: M1/M5/M15/M30/H1/H4/D1/W1/MN1<br>`count`: 数量(最大1000) |
-| `get_technical_indicators` | 获取技术指标 | `timeframe`: 时间周期<br>`indicators`: MA/EMA/RSI/MACD/BOLL/ATR/STOCH |
-| `get_market_analysis` | 综合市场分析 | `timeframe`: M15/H1/H4/D1 |
-| `get_tick_data` | 获取Tick逐笔数据 | `count`: 数量(最大1000) |
+| 工具名称                       | 描述                     | 参数                                                                |
+| -------------------------- | ---------------------- | ----------------------------------------------------------------- |
+| `get_market_info`          | 获取实时行情（Bid/Ask/Spread） | -                                                                 |
+| `get_klines`               | 获取K线数据                 | `timeframe`: M1/M5/M15/M30/H1/H4/D1/W1/MN1<br>`count`: 数量(最大1000) |
+| `get_technical_indicators` | 获取技术指标                 | `timeframe`: 时间周期<br>`indicators`: MA/EMA/RSI/MACD/BOLL/ATR/STOCH |
+| `get_market_analysis`      | 综合市场分析                 | `timeframe`: M15/H1/H4/D1                                         |
+| `get_tick_data`            | 获取Tick逐笔数据             | `count`: 数量(最大1000)                                               |
 
 #### 技术指标说明
 
-| 指标 | 返回内容 |
-|------|----------|
-| **MA** | MA5/10/20/60 均线 + 趋势判断 |
-| **EMA** | EMA12/26 指数均线 |
-| **RSI** | RSI14 + 超买/超卖信号 |
-| **MACD** | MACD线/信号线/柱状图 + 金叉死叉判断 |
-| **BOLL** | 布林带上轨/中轨/下轨 + 带宽 + 价格位置 |
-| **ATR** | ATR14 真实波幅 + 波动率等级 |
-| **STOCH** | 随机指标K/D值 + 交易信号 |
+| 指标        | 返回内容                    |
+| --------- | ----------------------- |
+| **MA**    | MA5/10/20/60 均线 + 趋势判断  |
+| **EMA**   | EMA12/26 指数均线           |
+| **RSI**   | RSI14 + 超买/超卖信号         |
+| **MACD**  | MACD线/信号线/柱状图 + 金叉死叉判断  |
+| **BOLL**  | 布林带上轨/中轨/下轨 + 带宽 + 价格位置 |
+| **ATR**   | ATR14 真实波幅 + 波动率等级      |
+| **STOCH** | 随机指标K/D值 + 交易信号         |
 
 #### 市场分析返回示例
 
@@ -308,13 +335,13 @@ pip install mcp
 
 ### MCP 资源
 
-| 资源 URI | 说明 |
-|----------|------|
-| `trading://status` | 实时交易状态 |
-| `trading://config` | 策略配置 |
-| `trading://positions` | 持仓信息 |
-| `trading://strategy-doc` | 策略逻辑文档（推荐Agent先读取理解策略） |
-| `trading://strategy-code` | 策略完整源代码（敏感，按需使用） |
+| 资源 URI                    | 说明                     |
+| ------------------------- | ---------------------- |
+| `trading://status`        | 实时交易状态                 |
+| `trading://config`        | 策略配置                   |
+| `trading://positions`     | 持仓信息                   |
+| `trading://strategy-doc`  | 策略逻辑文档（推荐Agent先读取理解策略） |
+| `trading://strategy-code` | 策略完整源代码（敏感，按需使用）       |
 
 ### MCP 提示模板
 
@@ -337,27 +364,23 @@ AI Agent 可以通过 MCP 协议执行以下操作：
 
 #### 定时触发（周期性）
 
-| 场景 | 建议频率 | 使用工具 |
-|------|----------|----------|
-| 状态监控 | 每1分钟 | `get_trading_status` |
-| 风险检查 | 每1-5分钟 | `analyze_risk` |
+| 场景   | 建议频率    | 使用工具                  |
+| ---- | ------- | --------------------- |
+| 状态监控 | 每1分钟    | `get_trading_status`  |
+| 风险检查 | 每1-5分钟  | `analyze_risk`        |
 | 行情分析 | 每5-15分钟 | `get_market_analysis` |
-| 日报生成 | 每日收盘 | `daily_report` prompt |
+| 日报生成 | 每日收盘    | `daily_report` prompt |
 
 #### 事件触发（条件满足时）
 
-| 触发条件 | 建议动作 |
-|---------|----------|
-| 浮亏超过30% | 发送告警，密切关注 |
-| 浮亏超过50% | `analyze_risk` + 考虑 `pause_strategy` |
-| 浮亏超过70% | 紧急告警，可能需要 `close_all_positions` |
-| 马丁层级 >= 3 | 发送告警，关注市场走势 |
-| RSI超买/超卖 | `get_market_analysis` 评估风险 |
-| 策略异常停止 | `reload_strategy` 尝试恢复 |
-
-
-
-
+| 触发条件      | 建议动作                                 |
+| --------- | ------------------------------------ |
+| 浮亏超过30%   | 发送告警，密切关注                            |
+| 浮亏超过50%   | `analyze_risk` + 考虑 `pause_strategy` |
+| 浮亏超过70%   | 紧急告警，可能需要 `close_all_positions`      |
+| 马丁层级 >= 3 | 发送告警，关注市场走势                          |
+| RSI超买/超卖  | `get_market_analysis` 评估风险           |
+| 策略异常停止    | `reload_strategy` 尝试恢复               |
 
 ## 监控服务
 
@@ -400,37 +423,35 @@ config = {
 
 ### MACD 告警类型
 
-| 告警类型 | 级别 | 说明 |
-|---------|------|------|
-| `macd_golden_cross` | info/warning | 金叉信号（零轴上方更强） |
-| `macd_death_cross` | warning/danger | 死叉信号（零轴下方更危险） |
-| `macd_zero_cross_up` | info | MACD上穿零轴，趋势转多 |
-| `macd_zero_cross_down` | warning | MACD下穿零轴，趋势转空 |
-| `macd_histogram_bullish_reversal` | info | 柱状图由减转增，下跌动能减弱 |
-| `macd_histogram_bearish_reversal` | warning | 柱状图由增转减，上涨动能减弱 |
-| `macd_bullish_divergence` | info | 底背离，可能见底 |
-| `macd_bearish_divergence` | danger | 顶背离，可能见顶 |
+| 告警类型                              | 级别             | 说明             |
+| --------------------------------- | -------------- | -------------- |
+| `macd_golden_cross`               | info/warning   | 金叉信号（零轴上方更强）   |
+| `macd_death_cross`                | warning/danger | 死叉信号（零轴下方更危险）  |
+| `macd_zero_cross_up`              | info           | MACD上穿零轴，趋势转多  |
+| `macd_zero_cross_down`            | warning        | MACD下穿零轴，趋势转空  |
+| `macd_histogram_bullish_reversal` | info           | 柱状图由减转增，下跌动能减弱 |
+| `macd_histogram_bearish_reversal` | warning        | 柱状图由增转减，上涨动能减弱 |
+| `macd_bullish_divergence`         | info           | 底背离，可能见底       |
+| `macd_bearish_divergence`         | danger         | 顶背离，可能见顶       |
 
 ### 全部告警类型汇总
 
-| 类别 | 告警类型 | 级别 | 说明 |
-|------|---------|------|------|
-| **风险** | `risk_loss` | warning/danger/critical | 浮亏达到30%/50%/70% |
-| | `risk_martin` | warning/danger/critical | 马丁层级达到2/3/4层 |
-| **RSI** | `market_rsi` | warning | RSI超买(>70)或超卖(<30) |
-| **波动率** | `market_volatility` | warning | ATR%超过阈值 |
-| **马丁控制** | `martin_control` | warning | 建议禁用马丁（高波动/趋势行情） |
-| **MACD** | `macd_golden_cross` | info/warning | 金叉信号 |
-| | `macd_death_cross` | warning/danger | 死叉信号 |
-| | `macd_zero_cross_up` | info | 上穿零轴 |
-| | `macd_zero_cross_down` | warning | 下穿零轴 |
-| | `macd_histogram_bullish_reversal` | info | 柱状图转增 |
-| | `macd_histogram_bearish_reversal` | warning | 柱状图转减 |
-| | `macd_bullish_divergence` | info | 底背离 |
-| | `macd_bearish_divergence` | danger | 顶背离 |
-| **状态** | `status` | info/critical | 策略暂停/停止 |
-
-
+| 类别       | 告警类型                              | 级别                      | 说明                 |
+| -------- | --------------------------------- | ----------------------- | ------------------ |
+| **风险**   | `risk_loss`                       | warning/danger/critical | 浮亏达到30%/50%/70%    |
+|          | `risk_martin`                     | warning/danger/critical | 马丁层级达到2/3/4层       |
+| **RSI**  | `market_rsi`                      | warning                 | RSI超买(>70)或超卖(<30) |
+| **波动率**  | `market_volatility`               | warning                 | ATR%超过阈值           |
+| **马丁控制** | `martin_control`                  | warning                 | 建议禁用马丁（高波动/趋势行情）   |
+| **MACD** | `macd_golden_cross`               | info/warning            | 金叉信号               |
+|          | `macd_death_cross`                | warning/danger          | 死叉信号               |
+|          | `macd_zero_cross_up`              | info                    | 上穿零轴               |
+|          | `macd_zero_cross_down`            | warning                 | 下穿零轴               |
+|          | `macd_histogram_bullish_reversal` | info                    | 柱状图转增              |
+|          | `macd_histogram_bearish_reversal` | warning                 | 柱状图转减              |
+|          | `macd_bullish_divergence`         | info                    | 底背离                |
+|          | `macd_bearish_divergence`         | danger                  | 顶背离                |
+| **状态**   | `status`                          | info/critical           | 策略暂停/停止            |
 
 ## 架构图
 
@@ -461,8 +482,6 @@ config = {
                     │    (交易执行)          │
                     └───────────────────────┘
 ```
-
-
 
 ## 联系我们
 

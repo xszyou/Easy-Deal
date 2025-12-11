@@ -608,7 +608,7 @@ class AgentCallback:
     def __init__(self, url: str = "http://127.0.0.1:5000/v1/chat/completions",
                  api_key: str = "YOUR_API_KEY",
                  model: str = "fay-streming",
-                 role: str = "交易监控",
+                 role: str = "User",
                  cooldown: int = 1800):  # 同类预警冷却时间（秒），默认30分钟
         self.url = url
         self.api_key = api_key
@@ -723,7 +723,7 @@ if __name__ == "__main__":
         url="http://127.0.0.1:5000/v1/chat/completions",
         api_key="YOUR_API_KEY",
         model="fay-streming",
-        role="交易监控",
+        role="User",
         cooldown=1800  # 同类预警30分钟内不重复发送
     ))
 

@@ -397,6 +397,15 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="get_strategy_documentation",
+            description="获取策略逻辑文档，包含爬梯/马丁规则说明",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+        Tool(
             name="pause_strategy",
             description="暂停交易策略，策略将停止开新仓位但保留现有持仓",
             inputSchema={
@@ -689,6 +698,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         elif name == "get_config":
             config = strategy.get_config_info()
             return [TextContent(type="text", text=json.dumps(config, ensure_ascii=False, indent=2))]
+
+        elif name == "get_strategy_documentation":
+            doc = get_strategy_documentation()
+            return [TextContent(type="text", text=doc)]
 
         elif name == "pause_strategy":
             strategy.paused = True
