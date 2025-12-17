@@ -3,3 +3,4 @@ mcp>=1.0.0
 pytz>=2024.1
 pandas>=2.0.0
 flask>=3.0.0
+requests

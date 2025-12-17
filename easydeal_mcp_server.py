@@ -7,10 +7,15 @@ import asyncio
 import json
 import logging
 import os
+import threading
+import time
+import requests
+import functools
 from datetime import datetime, timedelta
 from typing import Any
 
 import MetaTrader5 as mt5
+import pytz
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
@@ -40,27 +45,52 @@ server = Server("easydeal-trading")
 
 # 全局策略实例引用
 strategy_instance = None
+strategy_thread = None
 
 # 策略文件路径
 STRATEGY_FILE_PATH = os.path.join(os.path.dirname(__file__), "easydeal_mt5.py")
+SERVER_FILE_PATH = __file__
+MONITOR_FILE_PATH = os.path.join(os.path.dirname(__file__), "easydeal_monitor.py")
+
+
+def get_file_content(file_path: str) -> str:
+    """读取文件内容"""
+    try:
+        if not os.path.exists(file_path):
+             return f"# 文件不存在: {file_path}"
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        return f"# 无法读取文件: {str(e)}"
+
+
+def start_strategy_thread():
+    """启动策略运行线程"""
+    global strategy_instance, strategy_thread
+    
+    if strategy_instance and strategy_instance.running:
+        # 如果线程已存在且正在运行，则无需重启
+        if strategy_thread and strategy_thread.is_alive():
+            return
+
+        logging.info("正在启动策略后台线程...")
+        strategy_thread = threading.Thread(target=strategy_instance.run, daemon=True)
+        strategy_thread.start()
 
 
 def get_strategy():
-    """获取或创建策略实例"""
+    """获取或创建策��实例"""
     global strategy_instance
     if strategy_instance is None:
         from easydeal_mt5 import EasyDealStrategy
         strategy_instance = EasyDealStrategy()
+        start_strategy_thread()
     return strategy_instance
 
 
 def get_strategy_source_code() -> str:
     """获取策略源代码"""
-    try:
-        with open(STRATEGY_FILE_PATH, 'r', encoding='utf-8') as f:
-            return f.read()
-    except Exception as e:
-        return f"# 无法读取策略源代码: {str(e)}"
+    return get_file_content(STRATEGY_FILE_PATH)
 
 
 def get_strategy_documentation() -> str:
@@ -371,7 +401,7 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="get_trading_status",
-            description="获取当前交易策略的完整状态，包括市场数据、策略状态、持仓订单和总利润",
+            description="获取当前交易策略的完整状态，包括市场数据、策略状态、马丁状态、持仓订单和总利润",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -449,6 +479,33 @@ async def list_tools() -> list[Tool]:
                         "default": 30
                     }
                 },
+                "required": []
+            }
+        ),
+        Tool(
+            name="read_server_code",
+            description="读取MCP服务器脚本 (easydeal_mcp_server.py) 的完整源代码",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+        Tool(
+            name="read_strategy_code",
+            description="读取MT5交易策略脚本 (easydeal_mt5.py) 的完整源代码",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+        Tool(
+            name="read_monitor_code",
+            description="读取监控脚本 (easydeal_monitor.py) 的完整源代码",
+            inputSchema={
+                "type": "object",
+                "properties": {},
                 "required": []
             }
         ),
@@ -664,6 +721,20 @@ async def list_tools() -> list[Tool]:
                 "required": []
             }
         ),
+        Tool(
+            name="notify_owner",
+            description="通知主人（发送消息给Fay数字人进行播报）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "要发送的消息内容"
+                    }
+                },
+                "required": ["message"]
+            }
+        ),
     ]
 
 
@@ -675,6 +746,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         if name == "get_trading_status":
             status = strategy.get_status()
+            # 获取并合并马丁状态
+            martin_status = strategy.get_martin_status()
+            status["martin_status"] = martin_status
             return [TextContent(type="text", text=json.dumps(status, ensure_ascii=False, indent=2))]
 
         elif name == "get_market_info":
@@ -740,6 +814,105 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = strategy.get_profit_history(start_time=start_time, end_time=end_time)
             return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
+        elif name == "get_history_orders":
+            start_date_str = arguments.get("start_date")
+            end_date_str = arguments.get("end_date")
+            count = arguments.get("count")
+            group = arguments.get("group")
+            
+            # Default to strategy symbol if not provided
+            if not group:
+                group = strategy.symbol
+            
+            # Determine time range
+            if end_date_str:
+                end_dt = datetime.strptime(end_date_str, "%Y-%m-%d %H:%M:%S")
+            else:
+                end_dt = datetime.now()
+                
+            if start_date_str:
+                start_dt = datetime.strptime(start_date_str, "%Y-%m-%d %H:%M:%S")
+            else:
+                # If count is provided, look back enough time (e.g., 1 year) to likely find them, 
+                # then slice. If no count, default to 30 days.
+                if count:
+                     start_dt = end_dt - timedelta(days=365)
+                else:
+                     start_dt = end_dt - timedelta(days=30)
+
+            # Ensure timezone (mt5 usually expects UTC or local depending on setup, but datetime objects work)
+            try:
+                timezone = pytz.timezone("Etc/UTC")
+                if start_dt.tzinfo is None:
+                    start_dt = timezone.localize(start_dt)
+                if end_dt.tzinfo is None:
+                    end_dt = timezone.localize(end_dt)
+            except Exception:
+                pass 
+
+            deals = mt5.history_deals_get(start_dt, end_dt, group=group)
+            
+            if deals is None:
+                 return [TextContent(type="text", text=json.dumps({"error": "无法获取历史订单", "mt5_error": mt5.last_error()}, ensure_ascii=False))]
+                 
+            deal_list = []
+            for deal in deals:
+                # If looking for strategy orders (default), filter by magic number if it matches strategy symbol
+                # Typically strategy users want to see THEIR orders.
+                # But if group is specified explicitly by user (e.g. "EURUSD"), they might want all.
+                # Here we assume if group was auto-set to strategy.symbol, we might want to filter?
+                # But users might want to see manual trades too.
+                # I will include magic number and let user decide, or filter?
+                # I will NOT filter by magic number to give full history for the symbol, 
+                # unless I want to be strict. `get_profit_history` DOES filter.
+                # Given "history transaction orders" usually implies "what did THIS bot do?" or "what happened on this account?"
+                # I'll stick to returning all deals for the group/symbol, but I'll add a flag `is_strategy_deal`.
+                
+                is_strategy_deal = (deal.magic == strategy.magic_number)
+                
+                deal_list.append({
+                    "ticket": deal.ticket,
+                    "order": deal.order,
+                    "time": datetime.fromtimestamp(deal.time).strftime("%Y-%m-%d %H:%M:%S"),
+                    "type": "BUY" if deal.type == mt5.DEAL_TYPE_BUY else "SELL",
+                    "entry": "IN" if deal.entry == mt5.DEAL_ENTRY_IN else "OUT" if deal.entry == mt5.DEAL_ENTRY_OUT else "IN/OUT",
+                    "volume": deal.volume,
+                    "price": deal.price,
+                    "commission": deal.commission,
+                    "swap": deal.swap,
+                    "profit": deal.profit,
+                    "magic": deal.magic,
+                    "comment": deal.comment,
+                    "is_strategy_deal": is_strategy_deal
+                })
+            
+            # Sort by time descending (newest first)
+            deal_list.sort(key=lambda x: x["time"], reverse=True)
+            
+            # Apply count limit
+            if count:
+                deal_list = deal_list[:count]
+                
+            return [TextContent(type="text", text=json.dumps({
+                "total_retrieved": len(deals),
+                "count": len(deal_list),
+                "start_date": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "end_date": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "orders": deal_list
+            }, ensure_ascii=False, indent=2))]
+
+        elif name == "read_server_code":
+            content = get_file_content(SERVER_FILE_PATH)
+            return [TextContent(type="text", text=content)]
+
+        elif name == "read_strategy_code":
+            content = get_file_content(STRATEGY_FILE_PATH)
+            return [TextContent(type="text", text=content)]
+
+        elif name == "read_monitor_code":
+            content = get_file_content(MONITOR_FILE_PATH)
+            return [TextContent(type="text", text=content)]
+
         elif name == "get_logs":
             lines = arguments.get("lines", 100)
             level = arguments.get("level", "ALL").upper()
@@ -778,6 +951,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         elif name == "reload_strategy":
             global strategy_instance
+            
+            # 停止旧策略
+            if strategy_instance:
+                strategy_instance.running = False
+                # 等待一小段时间确保旧线程有机会退出
+                time.sleep(0.1)
+            
             from easydeal_mt5 import EasyDealStrategy
             strategy_instance = EasyDealStrategy()
 
@@ -787,10 +967,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     "message": "策略重新加载失败"
                 }, ensure_ascii=False))]
 
+            # 启动新策略线程
+            start_strategy_thread()
+
             logging.info("策略已重新加载 (via MCP)")
             return [TextContent(type="text", text=json.dumps({
                 "success": True,
-                "message": "策略已重新加载",
+                "message": "策略已重新加载并启动运行",
                 "status": strategy_instance.get_status()
             }, ensure_ascii=False, indent=2))]
 
@@ -1392,6 +1575,48 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps({
                     "success": False,
                     "message": "没有提供需要更新的参数"
+                }, ensure_ascii=False))]
+
+        elif name == "notify_owner":
+            message = arguments.get("message")
+            if not message:
+                return [TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "message": "消息内容不能为空"
+                }, ensure_ascii=False))]
+            
+            try:
+                # 调用Fay透传接口
+                url = "http://127.0.0.1:5000/transparent-pass"
+                payload = {
+                    "user": "User",  # 默认用户
+                    "text": message,
+                    "audio": None
+                }
+                headers = {'Content-Type': 'application/json'}
+                
+                # 使用 run_in_executor 避免阻塞事件循环
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None, 
+                    functools.partial(requests.post, url, json=payload, headers=headers, timeout=5)
+                )
+                
+                if response.status_code == 200:
+                    return [TextContent(type="text", text=json.dumps({
+                        "success": True,
+                        "message": f"已通知主人: {message}"
+                    }, ensure_ascii=False))]
+                else:
+                    return [TextContent(type="text", text=json.dumps({
+                        "success": False,
+                        "message": f"通知失败，Fay服务器返回状态码: {response.status_code}"
+                    }, ensure_ascii=False))]
+            except Exception as e:
+                logging.error(f"通知主人失败: {str(e)}")
+                return [TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "message": f"通知发送失败: {str(e)}"
                 }, ensure_ascii=False))]
 
         else:

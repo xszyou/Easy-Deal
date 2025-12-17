@@ -305,6 +305,7 @@ class EasyDealStrategy:
                 self.follow_type = None
                 self.seek = 0
                 logging.info(f"{self.get_market_info()} 平仓完成")
+                logging.info(f"{self.get_market_info()} =========== 新周期开始 ===========")
                 return
                 
         # 重置方向
@@ -1085,6 +1086,10 @@ class EasyDealStrategy:
     def run(self):
         """主运行循环"""
         while self.running:
+            if self.paused:
+                time.sleep(1)
+                continue
+
             if not self.is_open_position:
                 self.check_entry_conditions()
             else:

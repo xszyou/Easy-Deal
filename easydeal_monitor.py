@@ -60,12 +60,16 @@ class TradingMonitor:
             "risk_check_interval": 60,
             "market_check_interval": 300,
             "status_check_interval": 30,
+            
+            # 定时报告间隔
+            "hourly_report_interval": 3600,
         }
 
         # 状态追踪
         self.last_status = None
         self.last_market_analysis = None
         self.last_macd_state = None  # 追踪MACD状态变化
+        self.last_hourly_report_time = 0  # 上次小时报时间
 
     def add_callback(self, callback: Callable):
         """添加回调函数"""
@@ -263,15 +267,30 @@ class TradingMonitor:
 
         # 检查持仓变化
         if self.last_status:
-            last_positions = len(self.last_status["orders"]["buy_orders"]) + \
-                           len(self.last_status["orders"]["sell_orders"])
-            current_positions = len(status["orders"]["buy_orders"]) + \
-                              len(status["orders"]["sell_orders"])
+            last_tickets = set()
+            for order in self.last_status["orders"]["buy_orders"] + self.last_status["orders"]["sell_orders"]:
+                last_tickets.add(order["ticket"])
+            
+            current_tickets = set()
+            for order in status["orders"]["buy_orders"] + status["orders"]["sell_orders"]:
+                current_tickets.add(order["ticket"])
 
-            if current_positions != last_positions:
-                self.notify("status", "info",
-                    f"持仓数量变化: {last_positions} -> {current_positions}",
-                    {"from": last_positions, "to": current_positions})
+            if last_tickets != current_tickets:
+                new_orders = current_tickets - last_tickets
+                closed_orders = last_tickets - current_tickets
+                
+                msg_parts = []
+                if new_orders:
+                    msg_parts.append(f"新开仓:{len(new_orders)}笔")
+                if closed_orders:
+                    msg_parts.append(f"平仓:{len(closed_orders)}笔")
+                
+                message = f"持仓变动 - {', '.join(msg_parts)}"
+                self.notify("status", "info", message, {
+                    "new_tickets": list(new_orders),
+                    "closed_tickets": list(closed_orders),
+                    "total_positions": len(current_tickets)
+                })
 
         self.last_status = status
 
@@ -282,6 +301,59 @@ class TradingMonitor:
             "profit": status["orders"]["total_profit"],
             "alerts": alerts
         }
+
+    def send_hourly_report(self):
+        """发送每小时巡逻报告"""
+        try:
+            status = self.strategy.get_status()
+            symbol = self.strategy.symbol
+            
+            # 获取市场数据
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 100)
+            if rates is None or len(rates) == 0:
+                logger.error("无法获取K线数据用于小时报")
+                return
+
+            closes = [float(r['close']) for r in rates]
+            highs = [float(r['high']) for r in rates]
+            lows = [float(r['low']) for r in rates]
+            current_price = closes[-1]
+
+            # 计算指标
+            boll_deviation = self._check_bollinger_deviation(closes, highs, lows) or 0
+            macd_data = self._calculate_macd(closes)
+            macd_val = macd_data["macd"][-1] if macd_data["macd"] else 0
+            
+            # 策略状态
+            total_profit = status["orders"]["total_profit"]
+            martin_status = self.strategy.get_martin_status() if hasattr(self.strategy, 'get_martin_status') else {}
+            martin_enabled = martin_status.get("martin_enabled", False)
+            seek = status["strategy_state"]["seek"]
+            
+            # 构建消息
+            message = (
+                f"🛡️ 定时巡逻报告\n"
+                f"当前价格: {current_price:.5f}\n"
+                f"总浮动盈亏: {total_profit:.2f}\n"
+                f"马丁层级: {seek}\n"
+                f"马丁状态: {'✅开启' if martin_enabled else '⛔关闭'}\n"
+                f"布林带偏离: {boll_deviation:.2f}倍SD\n"
+                f"MACD值: {macd_val:.5f}"
+            )
+            
+            data = {
+                "price": current_price,
+                "profit": total_profit,
+                "boll_dev": boll_deviation,
+                "macd": macd_val,
+                "martin_enabled": martin_enabled,
+                "seek": seek
+            }
+            
+            self.notify("hourly_report", "info", message, data)
+            
+        except Exception as e:
+            logger.error(f"发���小时报失败: {e}")
 
     def _calculate_rsi(self, closes: list, period: int = 14) -> list:
         """计算RSI"""
@@ -564,6 +636,15 @@ class TradingMonitor:
                     self.check_market()
                     last_market_check = now
 
+                # 小时巡逻报告
+                if now - self.last_hourly_report_time >= self.config["hourly_report_interval"]:
+                    # 首次运行不立即发送，或者可以根据需求调整。这里假设首次运行也发送一次作为确认
+                    if self.last_hourly_report_time == 0:
+                        self.last_hourly_report_time = now # 避免启动立即发，等一个周期。如果想立即发，可以把这行去掉或者逻辑调整
+                    else:
+                        self.send_hourly_report()
+                        self.last_hourly_report_time = now
+
             except Exception as e:
                 logger.error(f"监控检查失败: {e}")
 
@@ -608,7 +689,7 @@ class AgentCallback:
     def __init__(self, url: str = "http://127.0.0.1:5000/v1/chat/completions",
                  api_key: str = "YOUR_API_KEY",
                  model: str = "fay-streming",
-                 role: str = "User",
+                 role: str = "安监",
                  cooldown: int = 1800):  # 同类预警冷却时间（秒），默认30分钟
         self.url = url
         self.api_key = api_key
@@ -723,7 +804,7 @@ if __name__ == "__main__":
         url="http://127.0.0.1:5000/v1/chat/completions",
         api_key="YOUR_API_KEY",
         model="fay-streming",
-        role="User",
+        role="安监",
         cooldown=1800  # 同类预警30分钟内不重复发送
     ))
 
