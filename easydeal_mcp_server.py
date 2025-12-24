@@ -287,12 +287,12 @@ class EasyDealStrategy:
                 time.sleep(1800)
                 return
             else:
-                logging.info(f"{self.get_market_info()} 双向开仓成功")
                 self.last_buy_ticket = buy_order.order
                 self.last_sell_ticket = sell_order.order
                 self.is_open_position = True
                 self.is_follow = False
                 self.follow_type = None
+                logging.info(f"{self.get_market_info()} 双向开仓成功 Buy#{self.last_buy_ticket} 价格:{symbol_info.ask:.5f} 手数:{self.first_lots} | Sell#{self.last_sell_ticket} 价格:{symbol_info.bid:.5f} 手数:{self.first_lots}")
 
     def check_add_and_take_profit(self):
         """检查加仓和止盈条件"""
@@ -463,6 +463,7 @@ class EasyDealStrategy:
 
                     if new_sell.retcode == mt5.TRADE_RETCODE_DONE:
                         self.last_sell_ticket = new_sell.order
+                        logging.info(f"{self.get_market_info()} 新Sell基础单#{self.last_sell_ticket} 价格:{symbol_info.bid:.5f} 手数:{self.first_lots} seek:{self.seek}")
                     else:
                         self.running = False
                         logging.error(f"{self.get_market_info()} sell 马丁开单失败#{new_sell.retcode}")
@@ -527,6 +528,7 @@ class EasyDealStrategy:
 
                     if new_buy.retcode == mt5.TRADE_RETCODE_DONE:
                         self.last_buy_ticket = new_buy.order
+                        logging.info(f"{self.get_market_info()} 新Buy基础单#{self.last_buy_ticket} 价格:{symbol_info.ask:.5f} 手数:{self.first_lots} seek:{self.seek}")
                     else:
                         self.running = False
                         logging.error(f"{self.get_market_info()} buy 马丁开单失败#{new_buy.retcode}")
@@ -745,9 +747,11 @@ class EasyDealStrategy:
                 if len(buy_orders) >= 1:
                     self.last_buy_ticket = buy_orders[-1].ticket
                 if len(sell_orders) >= 1:
-                    self.last_sell_ticket = sell_orders[-1].ticket
+                    # 第一个sell（按时间排序）是基础单，后面的都是马丁单
+                    self.last_sell_ticket = sell_orders[0].ticket
                 if len(sell_orders) > 1:
-                    self.martin_orders = [order.ticket for order in sell_orders[:-1]]
+                    # 马丁单是除了第一个基础单之外的所有sell单
+                    self.martin_orders = [order.ticket for order in sell_orders[1:]]
                     self.last_martin_ticket = self.martin_orders[-1] if self.martin_orders else None
                 else:
                     self.martin_orders = []
@@ -760,9 +764,11 @@ class EasyDealStrategy:
                 if len(sell_orders) >= 1:
                     self.last_sell_ticket = sell_orders[-1].ticket
                 if len(buy_orders) >= 1:
-                    self.last_buy_ticket = buy_orders[-1].ticket
+                    # 第一个buy（按时间排序）是基础单，后面的都是马丁单
+                    self.last_buy_ticket = buy_orders[0].ticket
                 if len(buy_orders) > 1:
-                    self.martin_orders = [order.ticket for order in buy_orders[:-1]]
+                    # 马丁单是除了第一个基础单之外的所有buy单
+                    self.martin_orders = [order.ticket for order in buy_orders[1:]]
                     self.last_martin_ticket = self.martin_orders[-1] if self.martin_orders else None
                 else:
                     self.martin_orders = []
@@ -771,17 +777,20 @@ class EasyDealStrategy:
                 logging.info("\n做空方向状态:")
 
             else:
-                self.last_buy_ticket = buy_orders[-1].ticket
-                self.last_sell_ticket = sell_orders[-1].ticket
+                # 数量相等时，第一个（按时间排序）是基础单
+                self.last_buy_ticket = buy_orders[0].ticket
+                self.last_sell_ticket = sell_orders[0].ticket
                 buy_total_volume = sum(o.volume for o in buy_orders)
                 sell_total_volume = sum(o.volume for o in sell_orders)
 
                 if sell_total_volume > buy_total_volume:
                     self.follow_type = mt5.ORDER_TYPE_BUY
-                    self.martin_orders = [o.ticket for o in sell_orders[:-1]]
+                    # 马丁单是除了第一个基础单之外的所有sell单
+                    self.martin_orders = [o.ticket for o in sell_orders[1:]]
                 elif buy_total_volume > sell_total_volume:
                     self.follow_type = mt5.ORDER_TYPE_SELL
-                    self.martin_orders = [o.ticket for o in buy_orders[:-1]]
+                    # 马丁单是除了第一个基础单之外的所有buy单
+                    self.martin_orders = [o.ticket for o in buy_orders[1:]]
                 else:
                     self.follow_type = None
                     self.martin_orders = []
