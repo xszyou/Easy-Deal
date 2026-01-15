@@ -1,6 +1,6 @@
 """
-EasyDeal MCP Server - 交易策略MCP服务器（统一入口）
-整合了交易策略、监控服务和MCP协议接口
+EasyDeal MCP Server - 交易监控MCP服务器（统一入口）
+整合了监控服务、MCP协议接口及告警通知
 """
 
 import asyncio
@@ -8,12 +8,14 @@ import json
 import logging
 import logging.handlers
 import os
+
 import time
 import threading
 import requests
 import functools
+import statistics
 from datetime import datetime, timedelta
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 from functools import wraps
 
 import MetaTrader5 as mt5
@@ -27,7 +29,6 @@ from mcp.types import (
     Resource,
     Prompt,
     PromptMessage,
-    PromptArgument,
     GetPromptResult,
 )
 
@@ -37,13 +38,30 @@ log_directory = "logs"
 if not os.path.exists(log_directory):
     os.makedirs(log_directory)
 
-# 主日志文件配置
+# 主日志文件配置 (按天轮转)
 log_file = os.path.join(log_directory, "easydeal.log")
-logging.basicConfig(
-    filename=log_file,
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+class _SuppressListToolsFilter(logging.Filter):
+    def filter(self, record):
+        message = record.getMessage()
+        return "Processing request of type ListToolsRequest" not in message
+
+# 避免重复添加 Handler
+if not logger.handlers:
+    # 按天轮转，保留最近30天
+    daily_handler = logging.handlers.TimedRotatingFileHandler(
+        log_file,
+        when="midnight",
+        interval=1,
+        backupCount=30,
+        encoding="utf-8"
+    )
+    daily_handler.suffix = "%Y-%m-%d" # 切割后的后缀格式
+    daily_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    daily_handler.addFilter(_SuppressListToolsFilter())
+    logger.addHandler(daily_handler)
 
 # API请求日志配置
 api_logger = logging.getLogger('api_logger')
@@ -74,48 +92,40 @@ server = Server("easydeal-trading")
 strategy_instance = None
 monitor_instance = None
 
-# 源代码文件路径
-SOURCE_FILE_PATH = __file__
 
 
-# ============== 交易策略类 ==============
+# ============== 交易上下文类 ==============
 
-class EasyDealStrategy:
+class TradingContext:
     def __init__(self):
-        logging.info("初始化策略实例")
+        logging.info("初始化交易上下文")
 
-        # 直接设置交易参数
-        self.symbol = "XAUUSDm"  # 交易币对
-        self.first_lots = 0.01  # 首单手数
-        self.step = 0.1  # 步长
-        self.martin_interval = 1.6  # 马丁间隔
-        self.filter = 0.1  # 过滤百分比
-        self.order_time = 0  # 下单时间
-        self.magic_number = 999  # 魔术数字
-        self.max_loss = 3000  # 最大亏损
-        self.max_martin_level = 5  # 最大马丁层数
-
-        # 马丁控制参数
-        self.martin_enabled = True  # 马丁开关（可由MCP控制）
-        self.max_atr_pct = 1.5  # ATR%超过此值暂停马丁
-        self.max_boll_deviation = 2.0  # 价格偏离布林带中轨超过N倍标准差时暂停马丁
-        self.martin_pause_reason = None  # 马丁暂停原因
+        # 监控配置
+        profile_path = os.getenv("EA_PROFILE_PATH")
+        self.profile_path = profile_path if profile_path else "monitor_profile.json"
+        self.profile = {}
+        self.symbols = ["XAUUSDm"]
+        self.symbol = self.symbols[0]
+        self.magic_numbers = [999]
+        self.magic_number = self.magic_numbers[0]
+        self.max_loss = 3000
+        self.comment_contains = []
+        self.comment_excludes = []
+        self.set_path = os.getenv("EA_SET_PATH")
+        if not self.set_path:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            self.set_path = os.path.abspath(os.path.join(base_dir, "..", "config.set"))
+        self.set_parameters = {}
+        set_ok, set_msg = self.load_set_file(self.set_path)
+        if not set_ok:
+            logging.warning(f"Set file load failed: {set_msg}")
 
         # 设置有效期（可选）
         self.expiry_date = None
         self.running = True
 
-        # Strategy state variables
+        # 运行状态
         self.is_open_position = False
-        self.last_buy_ticket = None
-        self.last_sell_ticket = None
-        self.last_martin_ticket = None
-        self.is_follow = False
-        self.follow_type = None
-        self.open_time = 0
-        self.martin_orders = []
-        self.seek = 0
-        self.paused = False
 
         # Initialize MT5 connection
         if not mt5.initialize():
@@ -123,6 +133,16 @@ class EasyDealStrategy:
             print("MT5初始化失败")
             self.running = False
         else:
+            ok, msg = self.load_profile(self.profile_path)
+            if not ok:
+                logging.warning(f"配置文件加载失败: {msg}")
+
+            env_ok, env_msg = self.apply_env_profile()
+            if env_ok:
+                logging.info(f"已应用环境变量配置: {env_msg}")
+            elif env_msg != "未设置环境变量配置":
+                logging.warning(f"环境变量配置无效: {env_msg}")
+
             # 验证币对是否存在
             symbol_info = mt5.symbol_info(self.symbol)
             if symbol_info is None:
@@ -131,54 +151,305 @@ class EasyDealStrategy:
                 self.running = False
                 return
 
-            self.update_ea_status()
-            logging.info(f"载入策略，交易币对: {self.symbol}")
+            self.refresh_position_state()
+            logging.info(f"载入交易上下文，交易币对: {self.symbol}")
 
     def get_config_info(self):
         """获取配置信息"""
         return {
             "parameters": {
+                "symbols": self.symbols,
                 "symbol": self.symbol,
-                "first_lots": self.first_lots,
-                "step": self.step,
-                "martin_interval": self.martin_interval,
-                "filter": self.filter,
-                "order_time": self.order_time,
+                "magic_numbers": self.magic_numbers,
                 "magic_number": self.magic_number,
                 "max_loss": self.max_loss,
-                "max_martin_level": self.max_martin_level
+                "comment_contains": self.comment_contains,
+                "comment_excludes": self.comment_excludes
             },
+            "profile_path": self.profile_path,
+            "set_path": self.set_path,
+            "set_parameters": self.set_parameters,
             "expiry_date": self.expiry_date.strftime("%Y-%m-%d %H:%M:%S") if self.expiry_date else None,
             "days_remaining": (self.expiry_date - datetime.now()).days if self.expiry_date else None,
             "is_expired": datetime.now() > self.expiry_date if self.expiry_date else False
         }
 
+    def _to_list(self, value):
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return value
+        return [value]
+
+    def _split_env_list(self, value: str):
+        if value is None:
+            return None
+        items = [item.strip() for item in value.replace(";", ",").split(",")]
+        return [item for item in items if item]
+
+    def apply_profile(self, profile: dict, source: str = None) -> tuple[bool, str]:
+        if not isinstance(profile, dict):
+            return False, "配置文件格式不正确"
+
+        errors = []
+        updated = []
+
+        symbols = self._to_list(profile.get("symbols"))
+        if symbols is None and "symbol" in profile:
+            symbols = self._to_list(profile.get("symbol"))
+        if symbols is not None:
+            valid_symbols = []
+            for sym in symbols:
+                if not isinstance(sym, str):
+                    errors.append(f"无效品种: {sym}")
+                    continue
+                if mt5.symbol_info(sym) is None:
+                    errors.append(f"品种不存在: {sym}")
+                    continue
+                valid_symbols.append(sym)
+            if valid_symbols:
+                self.symbols = valid_symbols
+                self.symbol = valid_symbols[0]
+                updated.append("symbols")
+            else:
+                errors.append("未找到可用的品种配置")
+
+        magics = self._to_list(profile.get("magic_numbers"))
+        if magics is None and "magic_number" in profile:
+            magics = self._to_list(profile.get("magic_number"))
+        if magics is not None:
+            cleaned = []
+            for value in magics:
+                try:
+                    cleaned.append(int(value))
+                except (TypeError, ValueError):
+                    errors.append(f"无效魔术号: {value}")
+            self.magic_numbers = cleaned
+            self.magic_number = cleaned[0] if cleaned else 0
+            updated.append("magic_numbers")
+
+        if "max_loss" in profile:
+            try:
+                self.max_loss = float(profile["max_loss"])
+                updated.append("max_loss")
+            except (TypeError, ValueError):
+                errors.append(f"无效 max_loss: {profile['max_loss']}")
+
+        comment_contains = self._to_list(profile.get("comment_contains"))
+        if comment_contains is not None:
+            self.comment_contains = [str(item) for item in comment_contains]
+            updated.append("comment_contains")
+
+        comment_excludes = self._to_list(profile.get("comment_excludes"))
+        if comment_excludes is not None:
+            self.comment_excludes = [str(item) for item in comment_excludes]
+            updated.append("comment_excludes")
+
+        if source:
+            self.profile_path = source
+        self.profile = profile
+
+        if errors:
+            return False, "; ".join(errors)
+        return True, "已应用配置: " + ", ".join(updated) if updated else "未更新任何配置"
+
+    def _coerce_set_value(self, value: str):
+        raw = value.strip()
+        if not raw:
+            return ""
+        lower = raw.lower()
+        if lower in ("true", "false"):
+            return lower == "true"
+        try:
+            if "." in raw or "e" in lower:
+                return float(raw)
+            return int(raw)
+        except ValueError:
+            return raw
+
+    def load_set_file(self, path: str) -> tuple[bool, str]:
+        if not path:
+            self.set_parameters = {}
+            return False, "set file path is empty"
+        if not os.path.exists(path):
+            self.set_parameters = {}
+            return False, f"set file not found: {path}"
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except Exception as exc:
+            self.set_parameters = {}
+            return False, f"failed to read set file: {exc}"
+
+        params = {}
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith(";") or stripped.startswith("#"):
+                continue
+            if "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key:
+                continue
+            if "||" in value:
+                value = value.split("||", 1)[0].strip()
+            params[key] = self._coerce_set_value(value)
+
+        self.set_parameters = params
+        self.set_path = path
+
+        mapped = []
+        if "MAGIC_NUMBER" in params:
+            try:
+                magic_value = int(params["MAGIC_NUMBER"])
+                self.magic_numbers = [magic_value]
+                self.magic_number = magic_value
+                mapped.append("MAGIC_NUMBER")
+            except (TypeError, ValueError):
+                logging.warning("Invalid MAGIC_NUMBER in set file: %s", params["MAGIC_NUMBER"])
+
+        message = f"loaded set file: {path}"
+        if mapped:
+            message = f"{message}; mapped: {', '.join(mapped)}"
+        return True, message
+
+    def load_profile(self, path: str) -> tuple[bool, str]:
+        if not path:
+            return False, "配置文件路径为空"
+        if not os.path.exists(path):
+            return False, f"找不到配置文件: {path}"
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                profile = json.load(f)
+        except Exception as e:
+            return False, f"读取配置文件失败: {e}"
+        return self.apply_profile(profile, source=path)
+
+    def apply_env_profile(self) -> tuple[bool, str]:
+        profile = {}
+
+        symbols_env = os.getenv("EA_SYMBOLS")
+        if symbols_env is not None:
+            profile["symbols"] = self._split_env_list(symbols_env)
+        else:
+            symbol_env = os.getenv("EA_SYMBOL")
+            if symbol_env is not None:
+                profile["symbol"] = symbol_env
+
+        magics_env = os.getenv("EA_MAGIC_NUMBERS")
+        if magics_env is not None:
+            profile["magic_numbers"] = self._split_env_list(magics_env)
+        else:
+            magic_env = os.getenv("EA_MAGIC_NUMBER")
+            if magic_env is not None:
+                profile["magic_number"] = magic_env
+
+        max_loss_env = os.getenv("EA_MAX_LOSS")
+        if max_loss_env is not None:
+            profile["max_loss"] = max_loss_env
+
+        comment_contains_env = os.getenv("EA_COMMENT_CONTAINS")
+        if comment_contains_env is not None:
+            profile["comment_contains"] = self._split_env_list(comment_contains_env)
+
+        comment_excludes_env = os.getenv("EA_COMMENT_EXCLUDES")
+        if comment_excludes_env is not None:
+            profile["comment_excludes"] = self._split_env_list(comment_excludes_env)
+
+        if not profile:
+            return False, "未设置环境变量配置"
+
+        return self.apply_profile(profile, source=self.profile_path)
+
+    def is_tracked_position(self, pos) -> bool:
+        if self.symbols and pos.symbol not in self.symbols:
+            return False
+        if self.magic_numbers:
+            if pos.magic not in self.magic_numbers:
+                return False
+        comment = (pos.comment or "").lower()
+        if self.comment_contains:
+            if not any(token.lower() in comment for token in self.comment_contains):
+                return False
+        if self.comment_excludes:
+            if any(token.lower() in comment for token in self.comment_excludes):
+                return False
+        return True
+
+    def is_tracked_deal(self, deal) -> bool:
+        if self.symbols and deal.symbol not in self.symbols:
+            return False
+        if self.magic_numbers:
+            if deal.magic not in self.magic_numbers:
+                return False
+        comment = (deal.comment or "").lower()
+        if self.comment_contains:
+            if not any(token.lower() in comment for token in self.comment_contains):
+                return False
+        if self.comment_excludes:
+            if any(token.lower() in comment for token in self.comment_excludes):
+                return False
+        return True
+
+    def _get_tracked_positions(self):
+        if self.symbols and len(self.symbols) == 1:
+            positions = mt5.positions_get(symbol=self.symbols[0])
+        else:
+            positions = mt5.positions_get()
+        if positions is None:
+            return None
+        return [pos for pos in positions if self.is_tracked_position(pos)]
+
     def get_status(self):
-        """获取策略状态数据"""
+        """获取交易状态数据"""
         symbol_info = mt5.symbol_info(self.symbol)
         if symbol_info is None:
             return {"error": "无法获取行情数据"}
 
-        positions = mt5.positions_get(symbol=self.symbol)
+        # 获取账户和终端信息
+        account_info = mt5.account_info()
+        terminal_info = mt5.terminal_info()
+        
+        positions = self.refresh_position_state()
         buy_orders = []
         sell_orders = []
 
         if positions:
             for pos in positions:
-                if pos.magic == self.magic_number:
-                    order_info = {
-                        "ticket": pos.ticket,
-                        "volume": pos.volume,
-                        "price_open": pos.price_open,
-                        "profit": pos.profit,
-                        "comment": pos.comment
-                    }
-                    if pos.type == mt5.ORDER_TYPE_BUY:
-                        buy_orders.append(order_info)
-                    else:
-                        sell_orders.append(order_info)
+                order_info = {
+                    "ticket": pos.ticket,
+                    "volume": pos.volume,
+                    "price_open": pos.price_open,
+                    "price_current": pos.price_current,
+                    "profit": pos.profit,
+                    "comment": pos.comment,
+                    "time": pos.time,
+                    "sl": pos.sl,
+                    "tp": pos.tp
+                }
+                if pos.type == mt5.ORDER_TYPE_BUY:
+                    buy_orders.append(order_info)
+                else:
+                    sell_orders.append(order_info)
+
+        buy_volume = sum(order["volume"] for order in buy_orders)
+        sell_volume = sum(order["volume"] for order in sell_orders)
+        total_profit = sum(pos.profit for pos in positions) if positions else 0
 
         status = {
+            "account": {
+                "balance": account_info.balance if account_info else 0,
+                "equity": account_info.equity if account_info else 0,
+                "margin_level": account_info.margin_level if account_info else 0,
+                "currency": account_info.currency if account_info else "USD"
+            },
+            "terminal": {
+                "connected": terminal_info.connected if terminal_info else False,
+                "ping": terminal_info.ping_last if terminal_info else -1,
+                "trade_allowed": terminal_info.trade_allowed if terminal_info else False
+            },
             "market_data": {
                 "symbol": self.symbol,
                 "bid": symbol_info.bid,
@@ -188,24 +459,39 @@ class EasyDealStrategy:
             },
             "strategy_state": {
                 "running": self.running,
-                "paused": self.paused,
-                "follow_type": "BUY" if self.follow_type == mt5.ORDER_TYPE_BUY else "SELL" if self.follow_type == mt5.ORDER_TYPE_SELL else None,
-                "seek": self.seek,
                 "is_open_position": self.is_open_position
             },
             "orders": {
                 "buy_orders": buy_orders,
                 "sell_orders": sell_orders,
-                "martin_orders": [int(ticket) for ticket in self.martin_orders],
-                "total_profit": sum(pos.profit for pos in positions if pos.magic == self.magic_number) if positions else 0
+                "summary": {
+                    "positions_total": len(buy_orders) + len(sell_orders),
+                    "buy_count": len(buy_orders),
+                    "sell_count": len(sell_orders),
+                    "buy_volume": buy_volume,
+                    "sell_volume": sell_volume,
+                    "net_volume": buy_volume - sell_volume
+                },
+                "total_profit": total_profit
             }
         }
 
         return status
 
+    def refresh_position_state(self):
+        """刷新持仓状态（仅用于监控与展示）"""
+        positions = self._get_tracked_positions()
+        if positions is None:
+            logging.error("无法获取持仓信息")
+            self.is_open_position = False
+            return []
+
+        self.is_open_position = bool(positions)
+        return positions
+
     def close_all_orders(self):
         """平掉所有订单"""
-        positions = mt5.positions_get(symbol=self.symbol)
+        positions = self._get_tracked_positions()
         if positions is None:
             return {"error": "无法获取持仓信息"}
 
@@ -213,598 +499,30 @@ class EasyDealStrategy:
         error_messages = []
 
         for pos in positions:
-            if pos.magic == self.magic_number:
-                order_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
-                price = mt5.symbol_info(self.symbol).bid if order_type == mt5.ORDER_TYPE_SELL else mt5.symbol_info(self.symbol).ask
+            order_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+            price = mt5.symbol_info(pos.symbol).bid if order_type == mt5.ORDER_TYPE_SELL else mt5.symbol_info(pos.symbol).ask
 
-                result = mt5.order_send({
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": self.symbol,
-                    "volume": pos.volume,
-                    "type": order_type,
-                    "position": pos.ticket,
-                    "price": price,
-                    "magic": self.magic_number,
-                    "comment": "Close all",
-                    "type_filling": mt5.ORDER_FILLING_IOC
-                })
+            result = mt5.order_send({
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": pos.symbol,
+                "volume": pos.volume,
+                "type": order_type,
+                "position": pos.ticket,
+                "price": price,
+                "magic": pos.magic,
+                "comment": "Close all",
+                "type_filling": mt5.ORDER_FILLING_IOC
+            })
 
-                if result.retcode != mt5.TRADE_RETCODE_DONE:
-                    success = False
-                    error_messages.append(f"订单 #{pos.ticket} 平仓失败: {result.retcode}")
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                success = False
+                error_messages.append(f"订单 #{pos.ticket} 平仓失败: {result.retcode}")
 
         if success:
             self.is_open_position = False
-            self.last_buy_ticket = None
-            self.last_sell_ticket = None
-            self.last_martin_ticket = None
-            self.is_follow = False
-            self.follow_type = None
-            self.open_time = 0
-            self.martin_orders = []
-            self.seek = 0
             return {"message": "所有订单已平仓"}
         else:
             return {"error": "部分订单平仓失败", "details": error_messages}
-
-    def check_entry_conditions(self):
-        """检查开仓条件"""
-        if time.time() >= self.open_time:
-            self.is_follow = True
-
-        if self.is_follow:
-            symbol_info = mt5.symbol_info(self.symbol)
-            if symbol_info is None:
-                return
-
-            # 开buy单
-            buy_order = mt5.order_send({
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": self.symbol,
-                "volume": self.first_lots,
-                "type": mt5.ORDER_TYPE_BUY,
-                "price": symbol_info.ask,
-                "magic": self.magic_number,
-                "comment": "Buy base",
-                "type_filling": mt5.ORDER_FILLING_IOC
-            })
-
-            # 开sell单
-            sell_order = mt5.order_send({
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": self.symbol,
-                "volume": self.first_lots,
-                "type": mt5.ORDER_TYPE_SELL,
-                "price": symbol_info.bid,
-                "magic": self.magic_number,
-                "comment": "Sell base",
-                "type_filling": mt5.ORDER_FILLING_IOC
-            })
-
-            if buy_order.retcode != mt5.TRADE_RETCODE_DONE or sell_order.retcode != mt5.TRADE_RETCODE_DONE:
-                logging.error(f"{self.get_market_info()} 下单失败，错误代码: {buy_order.retcode}, {sell_order.retcode}，1800秒后重试")
-                self.is_follow = False
-                time.sleep(1800)
-                return
-            else:
-                self.last_buy_ticket = buy_order.order
-                self.last_sell_ticket = sell_order.order
-                self.is_open_position = True
-                self.is_follow = False
-                self.follow_type = None
-                logging.info(f"{self.get_market_info()} 双向开仓成功 Buy#{self.last_buy_ticket} 价格:{symbol_info.ask:.5f} 手数:{self.first_lots} | Sell#{self.last_sell_ticket} 价格:{symbol_info.bid:.5f} 手数:{self.first_lots}")
-
-    def check_add_and_take_profit(self):
-        """检查加仓和止盈条件"""
-        if not self.running:
-            return
-
-        symbol_info = mt5.symbol_info(self.symbol)
-        if symbol_info is None:
-            return
-
-        # 检查最大浮亏限制
-        if self.check_max_loss():
-            return
-
-        # 平掉盈利的马丁单
-        if self.follow_type is not None and self.seek > 0 and self.calc_total_martin_orders_profit() >= 0:
-            positions = mt5.positions_get(symbol=self.symbol)
-            if positions:
-                martin_profit = sum(pos.profit for pos in positions if pos.ticket in self.martin_orders)
-                base_profit = sum(pos.profit for pos in positions if pos.ticket not in self.martin_orders)
-                logging.info(f"{self.get_market_info()} 准备平仓 - 马丁总盈亏:{martin_profit:.2f} 基础单盈亏:{base_profit:.2f}")
-
-            if self.close_martin_orders():
-                self.follow_type = None
-                self.seek = 0
-                logging.info(f"{self.get_market_info()} 平仓完成")
-                logging.info(f"{self.get_market_info()} =========== 新周期开始 ===========")
-                return
-
-        # 重置方向
-        if self.seek == 0:
-            if self.follow_type == mt5.ORDER_TYPE_BUY:
-                sell_pos = mt5.positions_get(ticket=self.last_sell_ticket)
-                if sell_pos and sell_pos[0].profit >= 0:
-                    self.follow_type = None
-                    logging.info(f"{self.get_market_info()} 越过下边界，重置楼梯方向")
-
-            elif self.follow_type == mt5.ORDER_TYPE_SELL:
-                buy_pos = mt5.positions_get(ticket=self.last_buy_ticket)
-                if buy_pos and buy_pos[0].profit >= 0:
-                    self.follow_type = None
-                    logging.info(f"{self.get_market_info()} 越过上边界，重置楼梯方向")
-
-        # 往上爬梯
-        buy_pos = mt5.positions_get(ticket=self.last_buy_ticket)
-        if buy_pos and self.follow_type != mt5.ORDER_TYPE_SELL:
-            buy_profit_percent = (symbol_info.bid - buy_pos[0].price_open) / buy_pos[0].price_open * 100
-            if buy_profit_percent >= self.step:
-                logging.info(f"{self.get_market_info()} 准备向上爬梯平仓 - Buy#{buy_pos[0].ticket} 获利:{buy_pos[0].profit:.2f}")
-
-                close_order = mt5.order_send({
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": self.symbol,
-                    "volume": buy_pos[0].volume,
-                    "type": mt5.ORDER_TYPE_SELL,
-                    "position": self.last_buy_ticket,
-                    "price": symbol_info.bid,
-                    "magic": self.magic_number,
-                    "comment": "Close buy for ladder up",
-                    "type_filling": mt5.ORDER_FILLING_IOC
-                })
-
-                if close_order.retcode == mt5.TRADE_RETCODE_DONE:
-                    logging.info(f"{self.get_market_info()} 向上爬梯平仓完成 - Buy#{buy_pos[0].ticket}")
-
-                    lots = buy_pos[0].volume
-                    new_buy = mt5.order_send({
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": self.symbol,
-                        "volume": self.first_lots,
-                        "type": mt5.ORDER_TYPE_BUY,
-                        "price": symbol_info.ask,
-                        "magic": self.magic_number,
-                        "comment": "Buy base",
-                        "type_filling": mt5.ORDER_FILLING_IOC
-                    })
-
-                    if new_buy.retcode == mt5.TRADE_RETCODE_DONE:
-                        self.last_buy_ticket = new_buy.order
-                        logging.info(f"{self.get_market_info()} 往上爬梯 - Buy#{new_buy.order} 价格:{symbol_info.ask:.5f} 手数:{lots}")
-                        if self.follow_type is None:
-                            self.follow_type = mt5.ORDER_TYPE_BUY
-                            self.last_martin_ticket = self.last_sell_ticket
-                    else:
-                        self.running = False
-                        logging.error(f"{self.get_market_info()} 往上爬梯buy失败：#{new_buy.retcode}")
-                else:
-                    self.running = False
-                    logging.error(f"{self.get_market_info()} 往上爬梯close失败：#{close_order.retcode}")
-
-        # 往下爬梯
-        sell_pos = mt5.positions_get(ticket=self.last_sell_ticket)
-        if sell_pos and self.follow_type != mt5.ORDER_TYPE_BUY:
-            sell_profit_percent = (sell_pos[0].price_open - symbol_info.ask) / sell_pos[0].price_open * 100
-            if sell_profit_percent >= self.step:
-                logging.info(f"{self.get_market_info()} 准备向下爬梯平仓 - Sell#{sell_pos[0].ticket} 获利:{sell_pos[0].profit:.2f}")
-
-                close_order = mt5.order_send({
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": self.symbol,
-                    "volume": sell_pos[0].volume,
-                    "type": mt5.ORDER_TYPE_BUY,
-                    "position": self.last_sell_ticket,
-                    "price": symbol_info.ask,
-                    "magic": self.magic_number,
-                    "comment": "Close sell for ladder down",
-                    "type_filling": mt5.ORDER_FILLING_IOC
-                })
-
-                if close_order.retcode == mt5.TRADE_RETCODE_DONE:
-                    logging.info(f"{self.get_market_info()} 向下爬梯平仓完成 - Sell#{sell_pos[0].ticket}")
-
-                    lots = sell_pos[0].volume
-                    new_sell = mt5.order_send({
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": self.symbol,
-                        "volume": self.first_lots,
-                        "type": mt5.ORDER_TYPE_SELL,
-                        "price": symbol_info.bid,
-                        "magic": self.magic_number,
-                        "comment": "Sell base",
-                        "type_filling": mt5.ORDER_FILLING_IOC
-                    })
-
-                    if new_sell.retcode == mt5.TRADE_RETCODE_DONE:
-                        self.last_sell_ticket = new_sell.order
-                        logging.info(f"{self.get_market_info()} 往下爬梯 - Sell#{new_sell.order} 价格:{symbol_info.bid:.5f} 手数:{lots}")
-                        if self.follow_type is None:
-                            self.follow_type = mt5.ORDER_TYPE_SELL
-                            self.last_martin_ticket = self.last_buy_ticket
-                    else:
-                        self.running = False
-                        logging.error(f"{self.get_market_info()} 往下爬梯sell失败：#{new_sell.retcode}")
-                else:
-                    self.running = False
-                    logging.error(f"{self.get_market_info()} 往下爬梯close失败：#{close_order.retcode}")
-
-        # 添加马丁单 - Buy方向
-        if self.follow_type == mt5.ORDER_TYPE_BUY:
-            buy_pos = mt5.positions_get(ticket=self.last_buy_ticket)
-            sell_pos = mt5.positions_get(ticket=self.last_sell_ticket)
-            if buy_pos and sell_pos:
-                buy_profit_percent = (symbol_info.bid - buy_pos[0].price_open) / buy_pos[0].price_open * 100
-                sell_profit_percent = (sell_pos[0].price_open - symbol_info.ask) / sell_pos[0].price_open * 100
-
-                if buy_profit_percent <= -self.filter and sell_profit_percent <= -self.martin_interval:
-                    martin_allowed, pause_reason = self.check_martin_conditions()
-                    if not martin_allowed:
-                        self.martin_pause_reason = pause_reason
-                        if self.seek == 0:
-                            logging.warning(f"{self.get_market_info()} 马丁暂停: {pause_reason}")
-                        return
-
-                    self.martin_orders.append(self.last_sell_ticket)
-                    self.seek += 1
-
-                    lots = sell_pos[0].volume
-                    new_sell = mt5.order_send({
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": self.symbol,
-                        "volume": self.first_lots,
-                        "type": mt5.ORDER_TYPE_SELL,
-                        "price": symbol_info.bid,
-                        "magic": self.magic_number,
-                        "comment": "Sell base",
-                        "type_filling": mt5.ORDER_FILLING_IOC
-                    })
-
-                    if new_sell.retcode == mt5.TRADE_RETCODE_DONE:
-                        self.last_sell_ticket = new_sell.order
-                        logging.info(f"{self.get_market_info()} 新Sell基础单#{self.last_sell_ticket} 价格:{symbol_info.bid:.5f} 手数:{self.first_lots} seek:{self.seek}")
-                    else:
-                        self.running = False
-                        logging.error(f"{self.get_market_info()} sell 马丁开单失败#{new_sell.retcode}")
-                        return
-
-                    if len(self.martin_orders) >= self.max_martin_level:
-                        logging.warning(f"{self.get_market_info()} 达到最大马丁层数限制:{self.max_martin_level}")
-                        return
-
-                    martin_order = mt5.order_send({
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": self.symbol,
-                        "volume": (sell_pos[0].volume + self.first_lots) * 2 if self.seek > 1 else sell_pos[0].volume * 2,
-                        "type": mt5.ORDER_TYPE_SELL,
-                        "price": symbol_info.bid,
-                        "magic": self.magic_number,
-                        "comment": "Sell martin",
-                        "type_filling": mt5.ORDER_FILLING_IOC
-                    })
-
-                    if martin_order.retcode == mt5.TRADE_RETCODE_DONE:
-                        self.last_martin_ticket = martin_order.order
-                        self.martin_orders.append(self.last_martin_ticket)
-                        self.seek += 1
-                        sell_positions = mt5.positions_get(symbol=self.symbol)
-                        martin_total_profit = sum(pos.profit for pos in sell_positions if pos.type == mt5.ORDER_TYPE_SELL and pos.magic == self.magic_number and pos.ticket in self.martin_orders)
-                        logging.info(f"{self.get_market_info()} Sell马丁单#{martin_order.order} 价格:{symbol_info.bid:.5f} 手数:{(sell_pos[0].volume + self.first_lots) * 2 if self.seek > 1 else sell_pos[0].volume * 2} 马丁总浮亏:{martin_total_profit:.2f}")
-                    else:
-                        self.running = False
-                        logging.error(f"{self.get_market_info()} sell 马丁开单失败#{martin_order.retcode}")
-
-        # 添加马丁单 - Sell方向
-        elif self.follow_type == mt5.ORDER_TYPE_SELL:
-            buy_pos = mt5.positions_get(ticket=self.last_buy_ticket)
-            sell_pos = mt5.positions_get(ticket=self.last_sell_ticket)
-            if buy_pos and sell_pos:
-                buy_profit_percent = (symbol_info.bid - buy_pos[0].price_open) / buy_pos[0].price_open * 100
-                sell_profit_percent = (sell_pos[0].price_open - symbol_info.ask) / sell_pos[0].price_open * 100
-
-                if sell_profit_percent <= -self.filter and buy_profit_percent <= -self.martin_interval:
-                    martin_allowed, pause_reason = self.check_martin_conditions()
-                    if not martin_allowed:
-                        self.martin_pause_reason = pause_reason
-                        if self.seek == 0:
-                            logging.warning(f"{self.get_market_info()} 马丁暂停: {pause_reason}")
-                        return
-
-                    self.martin_orders.append(self.last_buy_ticket)
-                    self.seek += 1
-
-                    lots = buy_pos[0].volume
-                    new_buy = mt5.order_send({
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": self.symbol,
-                        "volume": self.first_lots,
-                        "type": mt5.ORDER_TYPE_BUY,
-                        "price": symbol_info.ask,
-                        "magic": self.magic_number,
-                        "comment": "Buy base",
-                        "type_filling": mt5.ORDER_FILLING_IOC
-                    })
-
-                    if new_buy.retcode == mt5.TRADE_RETCODE_DONE:
-                        self.last_buy_ticket = new_buy.order
-                        logging.info(f"{self.get_market_info()} 新Buy基础单#{self.last_buy_ticket} 价格:{symbol_info.ask:.5f} 手数:{self.first_lots} seek:{self.seek}")
-                    else:
-                        self.running = False
-                        logging.error(f"{self.get_market_info()} buy 马丁开单失败#{new_buy.retcode}")
-                        return
-
-                    if len(self.martin_orders) >= self.max_martin_level:
-                        logging.warning(f"{self.get_market_info()} 达到最大马丁层数限制:{self.max_martin_level}")
-                        return
-
-                    martin_order = mt5.order_send({
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": self.symbol,
-                        "volume": (buy_pos[0].volume + self.first_lots) * 2 if self.seek > 1 else buy_pos[0].volume * 2,
-                        "type": mt5.ORDER_TYPE_BUY,
-                        "price": symbol_info.ask,
-                        "magic": self.magic_number,
-                        "comment": "Buy martin",
-                        "type_filling": mt5.ORDER_FILLING_IOC
-                    })
-
-                    if martin_order.retcode == mt5.TRADE_RETCODE_DONE:
-                        self.last_martin_ticket = martin_order.order
-                        self.martin_orders.append(self.last_martin_ticket)
-                        self.seek += 1
-                        buy_positions = mt5.positions_get(symbol=self.symbol)
-                        martin_total_profit = sum(pos.profit for pos in buy_positions if pos.type == mt5.ORDER_TYPE_BUY and pos.magic == self.magic_number and pos.ticket in self.martin_orders)
-                        logging.info(f"{self.get_market_info()} Buy马丁单#{martin_order.order} 价格:{symbol_info.ask:.5f} 手数:{(buy_pos[0].volume + self.first_lots) * 2 if self.seek > 1 else buy_pos[0].volume * 2} 马丁总浮亏:{martin_total_profit:.2f}")
-                    else:
-                        self.running = False
-                        logging.error(f"{self.get_market_info()} buy 马丁开单失败#{martin_order.retcode}")
-
-    def calc_total_martin_orders_profit(self):
-        """计算所有马丁单的总利润"""
-        total_profit = 0
-        for ticket in self.martin_orders:
-            position = mt5.positions_get(ticket=ticket)
-            if position:
-                total_profit += position[0].profit
-
-        if self.follow_type == mt5.ORDER_TYPE_BUY:
-            base_position = mt5.positions_get(ticket=self.last_sell_ticket)
-            if base_position:
-                total_profit += base_position[0].profit
-        elif self.follow_type == mt5.ORDER_TYPE_SELL:
-            base_position = mt5.positions_get(ticket=self.last_buy_ticket)
-            if base_position:
-                total_profit += base_position[0].profit
-
-        return total_profit
-
-    def close_martin_orders(self):
-        """关闭所有马丁单"""
-        symbol_info = mt5.symbol_info(self.symbol)
-        if symbol_info is None:
-            return
-
-        for ticket in self.martin_orders:
-            position = mt5.positions_get(ticket=ticket)
-            if position:
-                order_type = mt5.ORDER_TYPE_BUY if position[0].type == mt5.ORDER_TYPE_SELL else mt5.ORDER_TYPE_SELL
-                price = symbol_info.ask if order_type == mt5.ORDER_TYPE_BUY else symbol_info.bid
-
-                close_order = mt5.order_send({
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": self.symbol,
-                    "volume": position[0].volume,
-                    "type": order_type,
-                    "position": position[0].ticket,
-                    "price": price,
-                    "magic": self.magic_number,
-                    "comment": "Close martin",
-                    "type_filling": mt5.ORDER_FILLING_IOC
-                })
-
-                if close_order.retcode != mt5.TRADE_RETCODE_DONE:
-                    logging.error(f"{self.get_market_info()} 关闭马丁单失败：#{close_order.retcode}")
-                    return False
-
-        if self.follow_type == mt5.ORDER_TYPE_BUY:
-            base_position = mt5.positions_get(ticket=self.last_sell_ticket)
-            if base_position:
-                close_order = mt5.order_send({
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": self.symbol,
-                    "volume": base_position[0].volume,
-                    "type": mt5.ORDER_TYPE_BUY,
-                    "position": self.last_sell_ticket,
-                    "price": symbol_info.ask,
-                    "magic": self.magic_number,
-                    "comment": "Close base with martin",
-                    "type_filling": mt5.ORDER_FILLING_IOC
-                })
-
-                if close_order.retcode == mt5.TRADE_RETCODE_DONE:
-                    new_sell = mt5.order_send({
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": self.symbol,
-                        "volume": self.first_lots,
-                        "type": mt5.ORDER_TYPE_SELL,
-                        "price": symbol_info.bid,
-                        "magic": self.magic_number,
-                        "comment": "Sell base",
-                        "type_filling": mt5.ORDER_FILLING_IOC
-                    })
-
-                    if new_sell.retcode == mt5.TRADE_RETCODE_DONE:
-                        self.last_sell_ticket = new_sell.order
-                    else:
-                        logging.error(f"{self.get_market_info()} 开新sell基础单失败：#{new_sell.retcode}")
-                        return False
-                else:
-                    logging.error(f"{self.get_market_info()} 关闭sell基础单失败：#{close_order.retcode}")
-                    return False
-
-        elif self.follow_type == mt5.ORDER_TYPE_SELL:
-            base_position = mt5.positions_get(ticket=self.last_buy_ticket)
-            if base_position:
-                close_order = mt5.order_send({
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": self.symbol,
-                    "volume": base_position[0].volume,
-                    "type": mt5.ORDER_TYPE_SELL,
-                    "position": self.last_buy_ticket,
-                    "price": symbol_info.bid,
-                    "magic": self.magic_number,
-                    "comment": "Close base with martin",
-                    "type_filling": mt5.ORDER_FILLING_IOC
-                })
-
-                if close_order.retcode == mt5.TRADE_RETCODE_DONE:
-                    new_buy = mt5.order_send({
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": self.symbol,
-                        "volume": self.first_lots,
-                        "type": mt5.ORDER_TYPE_BUY,
-                        "price": symbol_info.ask,
-                        "magic": self.magic_number,
-                        "comment": "Buy base",
-                        "type_filling": mt5.ORDER_FILLING_IOC
-                    })
-
-                    if new_buy.retcode == mt5.TRADE_RETCODE_DONE:
-                        self.last_buy_ticket = new_buy.order
-                    else:
-                        logging.error(f"{self.get_market_info()} 开新buy基础单失败：#{new_buy.retcode}")
-                        return False
-                else:
-                    logging.error(f"{self.get_market_info()} 关闭buy基础单失败：#{close_order.retcode}")
-                    return False
-
-        self.martin_orders = []
-        self.seek = 0
-        return True
-
-    def update_ea_status(self):
-        """更新EA状态，用于重载和恢复订单状态"""
-        positions = mt5.positions_get(symbol=self.symbol)
-        if positions is None:
-            logging.error("无法获取持仓信息")
-            return
-
-        buy_orders = []
-        sell_orders = []
-        for pos in positions:
-            if pos.magic == self.magic_number:
-                if pos.type == mt5.ORDER_TYPE_BUY:
-                    buy_orders.append(pos)
-                else:
-                    sell_orders.append(pos)
-
-        order_count = len(buy_orders) + len(sell_orders)
-        logging.info(f"\n{'='*50}")
-        logging.info("重新载入策略 - 状态数据:")
-        logging.info(f"总订单数: {order_count}")
-        logging.info(f"Buy订单数: {len(buy_orders)}")
-        logging.info(f"Sell订单数: {len(sell_orders)}")
-
-        if order_count == 0:
-            self.is_open_position = False
-            self.last_buy_ticket = None
-            self.last_sell_ticket = None
-            self.last_martin_ticket = None
-            self.is_follow = False
-            self.follow_type = None
-            self.open_time = 0
-            self.martin_orders = []
-            self.seek = 0
-            self.running = True
-            logging.info("\n状态已重置为初始状态")
-
-        elif order_count == 2 and len(buy_orders) == 1 and len(sell_orders) == 1:
-            self.last_buy_ticket = buy_orders[0].ticket
-            self.last_sell_ticket = sell_orders[0].ticket
-            self.is_open_position = True
-            self.last_martin_ticket = None
-            self.is_follow = False
-            self.follow_type = None
-            self.open_time = 0
-            self.martin_orders = []
-            self.seek = 0
-            self.running = True
-            logging.info("\n基础双向订单状态:")
-            logging.info(f"Buy订单: #{self.last_buy_ticket} 仓位:{buy_orders[0].volume:.2f} 利润:{buy_orders[0].profit:.2f}")
-            logging.info(f"Sell订单: #{self.last_sell_ticket} 仓位:{sell_orders[0].volume:.2f} 利润:{sell_orders[0].profit:.2f}")
-
-        elif order_count >= 2:
-            self.is_follow = False
-            self.running = True
-            self.is_open_position = True
-
-            buy_orders.sort(key=lambda x: x.time)
-            sell_orders.sort(key=lambda x: x.time)
-
-            if len(sell_orders) > len(buy_orders):
-                self.follow_type = mt5.ORDER_TYPE_BUY
-                if len(buy_orders) >= 1:
-                    self.last_buy_ticket = buy_orders[-1].ticket
-                if len(sell_orders) >= 1:
-                    # 第一个sell（按时间排序）是基础单，后面的都是马丁单
-                    self.last_sell_ticket = sell_orders[0].ticket
-                if len(sell_orders) > 1:
-                    # 马丁单是除了第一个基础单之外的所有sell单
-                    self.martin_orders = [order.ticket for order in sell_orders[1:]]
-                    self.last_martin_ticket = self.martin_orders[-1] if self.martin_orders else None
-                else:
-                    self.martin_orders = []
-                    self.last_martin_ticket = None
-                self.seek = len(self.martin_orders)
-                logging.info("\n做多方向状态:")
-
-            elif len(buy_orders) > len(sell_orders):
-                self.follow_type = mt5.ORDER_TYPE_SELL
-                if len(sell_orders) >= 1:
-                    self.last_sell_ticket = sell_orders[-1].ticket
-                if len(buy_orders) >= 1:
-                    # 第一个buy（按时间排序）是基础单，后面的都是马丁单
-                    self.last_buy_ticket = buy_orders[0].ticket
-                if len(buy_orders) > 1:
-                    # 马丁单是除了第一个基础单之外的所有buy单
-                    self.martin_orders = [order.ticket for order in buy_orders[1:]]
-                    self.last_martin_ticket = self.martin_orders[-1] if self.martin_orders else None
-                else:
-                    self.martin_orders = []
-                    self.last_martin_ticket = None
-                self.seek = len(self.martin_orders)
-                logging.info("\n做空方向状态:")
-
-            else:
-                # 数量相等时，第一个（按时间排序）是基础单
-                self.last_buy_ticket = buy_orders[0].ticket
-                self.last_sell_ticket = sell_orders[0].ticket
-                buy_total_volume = sum(o.volume for o in buy_orders)
-                sell_total_volume = sum(o.volume for o in sell_orders)
-
-                if sell_total_volume > buy_total_volume:
-                    self.follow_type = mt5.ORDER_TYPE_BUY
-                    # 马丁单是除了第一个基础单之外的所有sell单
-                    self.martin_orders = [o.ticket for o in sell_orders[1:]]
-                elif buy_total_volume > sell_total_volume:
-                    self.follow_type = mt5.ORDER_TYPE_SELL
-                    # 马丁单是除了第一个基础单之外的所有buy单
-                    self.martin_orders = [o.ticket for o in buy_orders[1:]]
-                else:
-                    self.follow_type = None
-                    self.martin_orders = []
-
-                self.seek = len(self.martin_orders)
-                self.last_martin_ticket = self.martin_orders[-1] if self.martin_orders else None
-
-            logging.info(f"\n当前seek值: {self.seek}")
-
-        else:
-            self.running = False
-            logging.error("\n订单状态异常（仅1个订单），请手动处理")
-
-        logging.info(f"{'='*50}\n")
 
     def get_profit_history(self, start_time=None, end_time=None):
         """获取指定时间段的收益历史"""
@@ -829,8 +547,7 @@ class EasyDealStrategy:
                 error = mt5.last_error()
                 return {"error": f"无法获取历史成交: {error}"}
 
-            strategy_deals = [deal for deal in deals
-                            if deal.magic == self.magic_number and deal.symbol == self.symbol]
+            strategy_deals = [deal for deal in deals if self.is_tracked_deal(deal)]
 
             total_profit = sum(deal.profit for deal in strategy_deals)
             total_volume = sum(deal.volume for deal in strategy_deals)
@@ -882,132 +599,313 @@ class EasyDealStrategy:
         except Exception as e:
             return {"error": f"分析失败: {str(e)}"}
 
+    def infer_strategy(self, days: int = 7, max_deals: int = 1000, hedge_window_sec: int = 5) -> dict:
+        """Infer likely EA behavior from observed trades (heuristic)."""
+        try:
+            if days <= 0:
+                days = 7
+            if max_deals <= 0:
+                max_deals = 1000
+            end_dt = datetime.now()
+            start_dt = end_dt - timedelta(days=days)
+
+            timezone = pytz.timezone("Etc/UTC")
+            start_dt = timezone.localize(start_dt)
+            end_dt = timezone.localize(end_dt)
+
+            deals = mt5.history_deals_get(start_dt, end_dt)
+            if deals is None:
+                error = mt5.last_error()
+                return {"error": f"unable to get deal history: {error}"}
+
+            tracked_deals = [deal for deal in deals if self.is_tracked_deal(deal)]
+            if not tracked_deals:
+                return {
+                    "window": {
+                        "start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        "end": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                    "metrics": {"deal_count": 0},
+                    "hypotheses": [],
+                    "notes": "no tracked deals"
+                }
+
+            entries = []
+            for deal in tracked_deals:
+                entry_flag = getattr(deal, "entry", None)
+                if entry_flag is None or entry_flag == mt5.DEAL_ENTRY_IN:
+                    entries.append(deal)
+
+            if not entries:
+                return {
+                    "window": {
+                        "start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        "end": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                    "metrics": {"deal_count": len(tracked_deals), "entry_count": 0},
+                    "hypotheses": [],
+                    "notes": "no entry deals"
+                }
+
+            entries.sort(key=lambda d: getattr(d, "time_msc", d.time))
+            if len(entries) > max_deals:
+                entries = entries[-max_deals:]
+
+            buy_entries = [d for d in entries if d.type == mt5.DEAL_TYPE_BUY]
+            sell_entries = [d for d in entries if d.type == mt5.DEAL_TYPE_SELL]
+
+            # Hedging detection: opposite-direction entries within a short window.
+            hedge_pairs = 0
+            used = set()
+            for i, deal in enumerate(entries):
+                if deal.ticket in used:
+                    continue
+                t0 = getattr(deal, "time_msc", deal.time)
+                for j in range(i + 1, len(entries)):
+                    other = entries[j]
+                    t1 = getattr(other, "time_msc", other.time)
+                    dt = (t1 - t0) / 1000.0 if isinstance(t1, int) and isinstance(t0, int) and t1 > 1e12 else (t1 - t0)
+                    if dt > hedge_window_sec:
+                        break
+                    if deal.type == other.type:
+                        continue
+                    vol_diff = abs(deal.volume - other.volume)
+                    vol_tol = max(deal.volume, other.volume) * 0.1
+                    if vol_diff <= vol_tol:
+                        hedge_pairs += 1
+                        used.add(deal.ticket)
+                        used.add(other.ticket)
+                        break
+
+            hedge_ratio = (hedge_pairs * 2) / len(entries) if entries else 0
+
+            def build_sequences(direction_entries, gap_minutes: int = 60):
+                seqs = []
+                current = []
+                gap_sec = gap_minutes * 60
+                for deal in sorted(direction_entries, key=lambda d: getattr(d, "time_msc", d.time)):
+                    if not current:
+                        current = [deal]
+                        continue
+                    prev = current[-1]
+                    t_prev = getattr(prev, "time", None)
+                    t_curr = getattr(deal, "time", None)
+                    if isinstance(t_prev, int):
+                        t_prev = datetime.fromtimestamp(t_prev)
+                    if isinstance(t_curr, int):
+                        t_curr = datetime.fromtimestamp(t_curr)
+                    if t_prev and t_curr and (t_curr - t_prev).total_seconds() <= gap_sec:
+                        current.append(deal)
+                    else:
+                        seqs.append(current)
+                        current = [deal]
+                if current:
+                    seqs.append(current)
+                return seqs
+
+            def safe_median(values):
+                try:
+                    return statistics.median(values)
+                except statistics.StatisticsError:
+                    return None
+
+            def safe_mean(values):
+                if not values:
+                    return None
+                return sum(values) / len(values)
+
+            def safe_pstdev(values):
+                if len(values) < 2:
+                    return 0.0
+                try:
+                    return statistics.pstdev(values)
+                except statistics.StatisticsError:
+                    return 0.0
+
+            sequences = build_sequences(entries)
+            grid_spacings = []
+            grid_seq_count = 0
+            for seq in sequences:
+                if len(seq) < 3:
+                    continue
+                prices = [d.price for d in seq]
+                spacings = [abs(prices[i] - prices[i - 1]) for i in range(1, len(prices)) if prices[i] and prices[i - 1]]
+                if len(spacings) < 2:
+                    continue
+                mean_spacing = safe_mean(spacings)
+                if not mean_spacing or mean_spacing == 0:
+                    continue
+                cv = safe_pstdev(spacings) / mean_spacing
+                if cv <= 0.3:
+                    grid_seq_count += 1
+                    grid_spacings.extend(spacings)
+
+            grid_spacing_median = safe_median(grid_spacings) or 0
+            grid_like_ratio = grid_seq_count / len(sequences) if sequences else 0
+
+            # Martingale detection: size increases on adverse moves.
+            martin_seq_count = 0
+            martin_ratios = []
+            for seq in sequences:
+                if len(seq) < 2:
+                    continue
+                ratios = []
+                adverse = 0
+                for i in range(1, len(seq)):
+                    prev = seq[i - 1]
+                    curr = seq[i]
+                    if prev.volume > 0:
+                        ratios.append(curr.volume / prev.volume)
+                    if prev.type == mt5.DEAL_TYPE_BUY and curr.price < prev.price:
+                        adverse += 1
+                    if prev.type == mt5.DEAL_TYPE_SELL and curr.price > prev.price:
+                        adverse += 1
+                if ratios:
+                    median_ratio = safe_median(ratios) or 0
+                    adverse_ratio = adverse / len(ratios)
+                    if median_ratio >= 1.5 and adverse_ratio >= 0.6:
+                        martin_seq_count += 1
+                        martin_ratios.append(median_ratio)
+
+            martin_ratio_median = safe_median(martin_ratios) or 0
+            martin_like_ratio = martin_seq_count / len(sequences) if sequences else 0
+
+            # Holding time inference
+            pos_map = {}
+            for deal in tracked_deals:
+                pos_id = getattr(deal, "position_id", None)
+                if pos_id is None:
+                    continue
+                entry_flag = getattr(deal, "entry", None)
+                t = deal.time
+                if isinstance(t, int):
+                    t = datetime.fromtimestamp(t)
+                if pos_id not in pos_map:
+                    pos_map[pos_id] = {"entry": None, "exit": None}
+                if entry_flag == mt5.DEAL_ENTRY_IN:
+                    if pos_map[pos_id]["entry"] is None or t < pos_map[pos_id]["entry"]:
+                        pos_map[pos_id]["entry"] = t
+                elif entry_flag == mt5.DEAL_ENTRY_OUT:
+                    if pos_map[pos_id]["exit"] is None or t > pos_map[pos_id]["exit"]:
+                        pos_map[pos_id]["exit"] = t
+
+            hold_seconds = []
+            for item in pos_map.values():
+                if item["entry"] and item["exit"]:
+                    hold_seconds.append((item["exit"] - item["entry"]).total_seconds())
+
+            median_hold = safe_median(hold_seconds) or 0
+
+            # Time-of-day concentration
+            hour_counts = {}
+            for deal in entries:
+                t = deal.time
+                if isinstance(t, int):
+                    t = datetime.fromtimestamp(t)
+                hour = t.hour
+                hour_counts[hour] = hour_counts.get(hour, 0) + 1
+            top_hours = sorted(hour_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+            top_hour_ratio = (sum(c for _, c in top_hours) / len(entries)) if entries else 0
+
+            hypotheses = []
+            if hedge_ratio >= 0.3:
+                hypotheses.append({
+                    "name": "hedged_entries",
+                    "confidence": round(min(1.0, hedge_ratio / 0.6), 2),
+                    "evidence": [f"{hedge_pairs} paired entries within {hedge_window_sec}s", f"hedge_ratio={hedge_ratio:.2f}"]
+                })
+
+            if grid_like_ratio >= 0.3 and grid_spacing_median > 0:
+                hypotheses.append({
+                    "name": "grid_like_spacing",
+                    "confidence": round(min(1.0, grid_like_ratio / 0.6), 2),
+                    "evidence": [f"grid_sequences={grid_seq_count}/{len(sequences)}", f"median_spacing={grid_spacing_median:.5f}"]
+                })
+
+            if martin_like_ratio >= 0.2 and martin_ratio_median > 0:
+                hypotheses.append({
+                    "name": "martingale_like_sizing",
+                    "confidence": round(min(1.0, martin_like_ratio / 0.5), 2),
+                    "evidence": [f"martin_sequences={martin_seq_count}/{len(sequences)}", f"median_ratio={martin_ratio_median:.2f}"]
+                })
+
+            if median_hold > 0 and median_hold <= 300:
+                hypotheses.append({
+                    "name": "scalping_like_holds",
+                    "confidence": 0.4,
+                    "evidence": [f"median_hold_seconds={int(median_hold)}"]
+                })
+
+            if top_hour_ratio >= 0.6 and top_hours:
+                hours = ", ".join(str(h) for h, _ in top_hours)
+                hypotheses.append({
+                    "name": "time_window_bias",
+                    "confidence": round(min(1.0, top_hour_ratio / 0.8), 2),
+                    "evidence": [f"top_hours={hours}", f"top_hour_ratio={top_hour_ratio:.2f}"]
+                })
+
+            next_hints = []
+            if grid_spacing_median > 0:
+                positions = self._get_tracked_positions() or []
+                if positions:
+                    latest_buy = None
+                    latest_sell = None
+                    for pos in positions:
+                        t = pos.time
+                        if isinstance(t, int):
+                            t = datetime.fromtimestamp(t)
+                        if pos.type == mt5.ORDER_TYPE_BUY:
+                            if latest_buy is None or t > latest_buy["time"]:
+                                latest_buy = {"time": t, "price": pos.price_open, "volume": pos.volume}
+                        else:
+                            if latest_sell is None or t > latest_sell["time"]:
+                                latest_sell = {"time": t, "price": pos.price_open, "volume": pos.volume}
+
+                    if latest_buy:
+                        next_hints.append({
+                            "type": "BUY",
+                            "trigger_price": round(latest_buy["price"] - grid_spacing_median, 5),
+                            "note": "grid-like spacing inference",
+                            "confidence": 0.3
+                        })
+                    if latest_sell:
+                        next_hints.append({
+                            "type": "SELL",
+                            "trigger_price": round(latest_sell["price"] + grid_spacing_median, 5),
+                            "note": "grid-like spacing inference",
+                            "confidence": 0.3
+                        })
+
+            return {
+                "window": {
+                    "start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "end": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "days": days
+                },
+                "metrics": {
+                    "deal_count": len(tracked_deals),
+                    "entry_count": len(entries),
+                    "buy_entries": len(buy_entries),
+                    "sell_entries": len(sell_entries),
+                    "hedge_ratio": round(hedge_ratio, 3),
+                    "grid_spacing_median": grid_spacing_median,
+                    "martin_ratio_median": martin_ratio_median,
+                    "median_hold_seconds": int(median_hold) if median_hold else 0,
+                    "top_hour_ratio": round(top_hour_ratio, 3)
+                },
+                "hypotheses": hypotheses,
+                "next_action_hints": next_hints
+            }
+
+        except Exception as e:
+            return {"error": f"inference failed: {e}"}
+
     def get_market_info(self):
         """获取当前行情信息字符串"""
         symbol_info = mt5.symbol_info(self.symbol)
         if symbol_info:
             return f"[{self.symbol} Bid:{symbol_info.bid:.5f} Ask:{symbol_info.ask:.5f}]"
         return ""
-
-    def calculate_atr(self, period=14):
-        """计算ATR指标"""
-        rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_H1, 0, period + 1)
-        if rates is None or len(rates) < period + 1:
-            return None
-
-        tr_list = []
-        for i in range(1, len(rates)):
-            high = float(rates[i]['high'])
-            low = float(rates[i]['low'])
-            prev_close = float(rates[i-1]['close'])
-            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-            tr_list.append(tr)
-
-        atr = sum(tr_list) / len(tr_list)
-        return atr
-
-    def calculate_bollinger(self, period=20, std_dev=2.0):
-        """计算布林带"""
-        rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_H1, 0, period)
-        if rates is None or len(rates) < period:
-            return None, None, None
-
-        closes = [float(r['close']) for r in rates]
-        middle = sum(closes) / period
-        variance = sum((x - middle) ** 2 for x in closes) / period
-        std = variance ** 0.5
-        upper = middle + std_dev * std
-        lower = middle - std_dev * std
-
-        return upper, middle, lower
-
-    def check_martin_conditions(self):
-        """检查是否允许开马丁单，返回 (allowed, reason)"""
-        if not self.martin_enabled:
-            return False, "马丁已被手动禁用"
-
-        symbol_info = mt5.symbol_info(self.symbol)
-        if symbol_info is None:
-            return False, "无法获取行情"
-        current_price = (symbol_info.bid + symbol_info.ask) / 2
-
-        atr = self.calculate_atr()
-        if atr:
-            atr_pct = atr / current_price * 100
-            if atr_pct > self.max_atr_pct:
-                return False, f"ATR波动率过高({atr_pct:.2f}% > {self.max_atr_pct}%)"
-
-        upper, middle, lower = self.calculate_bollinger()
-        if middle and upper and lower:
-            std = (upper - middle) / 2.0
-            if std > 0:
-                deviation = abs(current_price - middle) / std
-                if deviation > self.max_boll_deviation:
-                    direction = "上方" if current_price > middle else "下方"
-                    return False, f"价格偏离布林带中轨过大({direction}{deviation:.2f}倍标准差)"
-
-        return True, None
-
-    def get_martin_status(self):
-        """获取马丁状态信息"""
-        allowed, reason = self.check_martin_conditions()
-
-        atr = self.calculate_atr()
-        symbol_info = mt5.symbol_info(self.symbol)
-        current_price = (symbol_info.bid + symbol_info.ask) / 2 if symbol_info else 0
-        atr_pct = (atr / current_price * 100) if atr and current_price else 0
-
-        upper, middle, lower = self.calculate_bollinger()
-        boll_deviation = 0
-        if middle and upper:
-            std = (upper - middle) / 2.0
-            if std > 0:
-                boll_deviation = abs(current_price - middle) / std
-
-        return {
-            "martin_enabled": self.martin_enabled,
-            "martin_allowed": allowed,
-            "pause_reason": reason,
-            "current_seek": self.seek,
-            "max_martin_level": self.max_martin_level,
-            "indicators": {
-                "atr_pct": round(atr_pct, 4),
-                "max_atr_pct": self.max_atr_pct,
-                "boll_deviation": round(boll_deviation, 2),
-                "max_boll_deviation": self.max_boll_deviation,
-                "boll_upper": round(upper, 5) if upper else None,
-                "boll_middle": round(middle, 5) if middle else None,
-                "boll_lower": round(lower, 5) if lower else None,
-                "current_price": round(current_price, 5)
-            }
-        }
-
-    def check_max_loss(self):
-        """检查是否达到最大浮亏限制"""
-        positions = mt5.positions_get(symbol=self.symbol)
-        if positions:
-            total_profit = sum(pos.profit for pos in positions if pos.magic == self.magic_number)
-            if total_profit <= -self.max_loss:
-                logging.warning(f"{self.get_market_info()} 触发最大浮亏保护 总浮亏:{total_profit:.2f}")
-                self.close_all_orders()
-                self.running = False
-                return True
-        return False
-
-    def run(self):
-        """主运行循环"""
-        while self.running:
-            if self.paused:
-                time.sleep(1)
-                continue
-
-            if not self.is_open_position:
-                self.check_entry_conditions()
-            else:
-                self.check_add_and_take_profit()
-
-            time.sleep(0.01)
-
 
 # ============== 监控服务类 ==============
 
@@ -1024,36 +922,46 @@ class TradingMonitor:
             "loss_warning_pct": 30,
             "loss_danger_pct": 50,
             "loss_critical_pct": 70,
-            "martin_warning_level": 2,
-            "martin_danger_level": 3,
-            "martin_critical_level": 4,
-            "martin_disable_atr_pct": 1.2,
-            "martin_disable_boll_dev": 1.8,
+            "risk_check_interval": 60,
+            "status_check_interval": 30,
+        }
+        self.indicator_config = {
+            "timeframe": mt5.TIMEFRAME_H1,
+            "atr_period": 14,
+            "atr_pct_threshold": 1.5,
+            "boll_period": 20,
+            "boll_deviation_threshold": 2.0,
+            "rsi_period": 14,
             "rsi_overbought": 70,
             "rsi_oversold": 30,
-            "volatility_high_pct": 1.5,
-            "macd_cross_alert": True,
-            "macd_divergence_alert": True,
-            "macd_zero_cross_alert": True,
-            "macd_histogram_reversal_bars": 3,
-            "risk_check_interval": 60,
-            "market_check_interval": 300,
-            "status_check_interval": 30,
-            "hourly_report_interval": 3600,
+            "macd_fast": 12,
+            "macd_slow": 26,
+            "macd_signal": 9
         }
 
         self.last_status = None
-        self.last_market_analysis = None
-        self.last_macd_state = None
-        self.last_hourly_report_time = 0
+        
+        # 新增追踪变量
+        self.last_orders_map = {}  # ticket -> order_info
+        self.last_terminal_connected = True
+        self.last_equity_log_time = 0
+        self.equity_log_interval = 3600  # 每小时记录一次资金快照
+        self.is_in_error_state = False
+        self.last_indicator_state = {
+            "atr_high": False,
+            "boll_high": False,
+            "rsi_overbought": False,
+            "rsi_oversold": False,
+            "macd_state": "neutral"
+        }
 
     def add_callback(self, callback: Callable):
         """添加回调函数"""
         self.callbacks.append(callback)
 
-    def notify(self, event_type: str, level: str, message: str, data: dict = None):
+    def notify(self, event_type: str, level: str, message: str, data: dict = None, alert_key: str = None):
         """发送通知"""
-        alert_key = f"{event_type}:{level}"
+        alert_key = alert_key or f"{event_type}:{level}"
         now = time.time()
         if alert_key in self.last_alert_time:
             if now - self.last_alert_time[alert_key] < self.alert_cooldown:
@@ -1089,14 +997,11 @@ class TradingMonitor:
 
         total_profit = status["orders"]["total_profit"]
         max_loss = config["parameters"]["max_loss"]
-        martin_level = self.strategy.seek
-        max_martin = config["parameters"]["max_martin_level"]
 
         alerts = []
+        loss_pct = abs(total_profit) / max_loss * 100 if total_profit < 0 else 0
 
         if total_profit < 0:
-            loss_pct = abs(total_profit) / max_loss * 100
-
             if loss_pct >= self.config["loss_critical_pct"]:
                 self.notify("risk_loss", "critical",
                     f"浮亏已达 {loss_pct:.1f}%，接近止损线！",
@@ -1113,345 +1018,395 @@ class TradingMonitor:
                     {"loss": total_profit, "loss_pct": loss_pct})
                 alerts.append("loss_warning")
 
-        if martin_level >= self.config["martin_critical_level"]:
-            self.notify("risk_martin", "critical",
-                f"马丁层级达到 {martin_level}/{max_martin}，风险极高！",
-                {"level": martin_level, "max": max_martin})
-            alerts.append("martin_critical")
-        elif martin_level >= self.config["martin_danger_level"]:
-            self.notify("risk_martin", "danger",
-                f"马丁层级达到 {martin_level}/{max_martin}",
-                {"level": martin_level, "max": max_martin})
-            alerts.append("martin_danger")
-        elif martin_level >= self.config["martin_warning_level"]:
-            self.notify("risk_martin", "warning",
-                f"马丁层级达到 {martin_level}",
-                {"level": martin_level, "max": max_martin})
-            alerts.append("martin_warning")
+        indicator_result = self.check_indicator_report()
+        if indicator_result.get("alerts"):
+            alerts.extend(indicator_result["alerts"])
 
         return {
             "total_profit": total_profit,
-            "loss_pct": abs(total_profit) / max_loss * 100 if total_profit < 0 else 0,
-            "martin_level": martin_level,
-            "alerts": alerts
+            "loss_pct": loss_pct,
+            "alerts": alerts,
+            "indicator_report": indicator_result
         }
 
+    def _capture_market_snapshot(self) -> str:
+        """捕获当前市场快照（价格与点差）"""
+        try:
+            info = mt5.symbol_info(self.strategy.symbol)
+            if not info:
+                return "[无法获取行情]"
+            return f"[{self.strategy.symbol} Bid:{info.bid:.5f} Ask:{info.ask:.5f} Spread:{info.spread}]"
+        except Exception as e:
+            return f"[快照计算错误: {e}]"
+
+    def _order_change_summary(self, previous: dict, current: dict) -> list[str]:
+        changes = []
+
+        def is_diff(a, b):
+            if a is None and b is None:
+                return False
+            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                return abs(a - b) > 1e-8
+            return a != b
+
+        def fmt(value):
+            if isinstance(value, float):
+                return f"{value:.5f}"
+            return str(value)
+
+        for field in ("volume", "price_open", "sl", "tp", "comment"):
+            if is_diff(previous.get(field), current.get(field)):
+                changes.append(f"{field}: {fmt(previous.get(field))} -> {fmt(current.get(field))}")
+
+        return changes
+
+    def _get_mid_price(self):
+        tick = mt5.symbol_info_tick(self.strategy.symbol)
+        if tick is None:
+            return None
+        bid = getattr(tick, "bid", 0.0)
+        ask = getattr(tick, "ask", 0.0)
+        if bid and ask:
+            return (bid + ask) / 2.0
+        last = getattr(tick, "last", 0.0)
+        return last or None
+
+    def _get_rates(self, timeframe, count):
+        rates = mt5.copy_rates_from_pos(self.strategy.symbol, timeframe, 0, count)
+        if rates is None or len(rates) < count:
+            return None
+        return rates
+
+    def _calc_atr_pct(self, period=14, timeframe=mt5.TIMEFRAME_H1):
+        rates = self._get_rates(timeframe, period + 1)
+        if rates is None:
+            return None
+        tr_values = []
+        for i in range(1, len(rates)):
+            high = rates[i]["high"]
+            low = rates[i]["low"]
+            prev_close = rates[i - 1]["close"]
+            tr_values.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+        if not tr_values:
+            return None
+        atr = sum(tr_values) / len(tr_values)
+        price = self._get_mid_price() or rates[-1]["close"]
+        if not price:
+            return None
+        return atr / price * 100
+
+    def _calc_boll_deviation(self, period=20, timeframe=mt5.TIMEFRAME_H1):
+        rates = self._get_rates(timeframe, period)
+        if rates is None:
+            return None
+        closes = [rate["close"] for rate in rates]
+        if len(closes) < 2:
+            return None
+        middle = sum(closes) / len(closes)
+        std = statistics.pstdev(closes)
+        if std <= 0:
+            return None
+        price = self._get_mid_price() or closes[-1]
+        if not price:
+            return None
+        return abs(price - middle) / std
+
+    def _calc_rsi(self, period=14, timeframe=mt5.TIMEFRAME_H1):
+        rates = self._get_rates(timeframe, period + 1)
+        if rates is None:
+            return None
+        closes = [rate["close"] for rate in rates]
+        if len(closes) < period + 1:
+            return None
+        gains = []
+        losses = []
+        for i in range(1, len(closes)):
+            delta = closes[i] - closes[i - 1]
+            if delta >= 0:
+                gains.append(delta)
+                losses.append(0)
+            else:
+                gains.append(0)
+                losses.append(-delta)
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+
+    def _calc_ema_series(self, values, period):
+        if not values or period <= 0 or len(values) < period:
+            return None
+        k = 2 / (period + 1)
+        ema_values = []
+        ema = sum(values[:period]) / period
+        ema_values.extend([None] * (period - 1))
+        ema_values.append(ema)
+        for value in values[period:]:
+            ema = (value - ema) * k + ema
+            ema_values.append(ema)
+        return ema_values
+
+    def _calc_macd(self, fast=12, slow=26, signal=9, timeframe=mt5.TIMEFRAME_H1):
+        bars_needed = slow + signal + 5
+        rates = self._get_rates(timeframe, bars_needed)
+        if rates is None:
+            return None
+        closes = [rate["close"] for rate in rates]
+        fast_ema = self._calc_ema_series(closes, fast)
+        slow_ema = self._calc_ema_series(closes, slow)
+        if fast_ema is None or slow_ema is None:
+            return None
+        macd_series = []
+        for i in range(len(closes)):
+            if fast_ema[i] is None or slow_ema[i] is None:
+                macd_series.append(None)
+            else:
+                macd_series.append(fast_ema[i] - slow_ema[i])
+        macd_values = [value for value in macd_series if value is not None]
+        if len(macd_values) < signal + 2:
+            return None
+        signal_series = self._calc_ema_series(macd_values, signal)
+        if signal_series is None or len(signal_series) < 2:
+            return None
+        current_macd = macd_values[-1]
+        prev_macd = macd_values[-2]
+        current_signal = signal_series[-1]
+        prev_signal = signal_series[-2]
+        hist = current_macd - current_signal
+        return {
+            "macd": current_macd,
+            "signal": current_signal,
+            "hist": hist,
+            "prev_macd": prev_macd,
+            "prev_signal": prev_signal
+        }
+
+    def check_indicator_report(self) -> dict:
+        cfg = self.indicator_config
+        timeframe = cfg["timeframe"]
+        results = {"alerts": []}
+
+        atr_pct = self._calc_atr_pct(cfg["atr_period"], timeframe)
+        if atr_pct is not None:
+            results["atr_pct"] = round(atr_pct, 4)
+            results["atr_threshold"] = cfg["atr_pct_threshold"]
+            if atr_pct > cfg["atr_pct_threshold"] and not self.last_indicator_state["atr_high"]:
+                self.last_indicator_state["atr_high"] = True
+            elif atr_pct <= cfg["atr_pct_threshold"]:
+                self.last_indicator_state["atr_high"] = False
+
+        boll_dev = self._calc_boll_deviation(cfg["boll_period"], timeframe)
+        if boll_dev is not None:
+            results["boll_dev"] = round(boll_dev, 4)
+            results["boll_threshold"] = cfg["boll_deviation_threshold"]
+            if boll_dev > cfg["boll_deviation_threshold"] and not self.last_indicator_state["boll_high"]:
+                self.last_indicator_state["boll_high"] = True
+            elif boll_dev <= cfg["boll_deviation_threshold"]:
+                self.last_indicator_state["boll_high"] = False
+
+        rsi_value = self._calc_rsi(cfg["rsi_period"], timeframe)
+        if rsi_value is not None:
+            results["rsi"] = round(rsi_value, 2)
+            results["rsi_overbought"] = cfg["rsi_overbought"]
+            results["rsi_oversold"] = cfg["rsi_oversold"]
+            if rsi_value >= cfg["rsi_overbought"] and not self.last_indicator_state["rsi_overbought"]:
+                self.last_indicator_state["rsi_overbought"] = True
+                self.last_indicator_state["rsi_oversold"] = False
+            elif rsi_value <= cfg["rsi_oversold"] and not self.last_indicator_state["rsi_oversold"]:
+                self.last_indicator_state["rsi_oversold"] = True
+                self.last_indicator_state["rsi_overbought"] = False
+            else:
+                if rsi_value < cfg["rsi_overbought"]:
+                    self.last_indicator_state["rsi_overbought"] = False
+                if rsi_value > cfg["rsi_oversold"]:
+                    self.last_indicator_state["rsi_oversold"] = False
+
+        macd_data = self._calc_macd(cfg["macd_fast"], cfg["macd_slow"], cfg["macd_signal"], timeframe)
+        if macd_data is not None:
+            results["macd"] = round(macd_data["macd"], 6)
+            results["macd_signal"] = round(macd_data["signal"], 6)
+            results["macd_hist"] = round(macd_data["hist"], 6)
+            prev_macd = macd_data["prev_macd"]
+            prev_signal = macd_data["prev_signal"]
+            current_state = "bull" if macd_data["macd"] > macd_data["signal"] else "bear" if macd_data["macd"] < macd_data["signal"] else "neutral"
+            if prev_macd <= prev_signal and macd_data["macd"] > macd_data["signal"]:
+                self.last_indicator_state["macd_state"] = "bull"
+            elif prev_macd >= prev_signal and macd_data["macd"] < macd_data["signal"]:
+                self.last_indicator_state["macd_state"] = "bear"
+            else:
+                self.last_indicator_state["macd_state"] = current_state
+
+        return results
+
     def check_status(self) -> dict:
-        """检查策略状态"""
+        """检查策略状态（核心监控逻辑）"""
         status = self.strategy.get_status()
         alerts = []
+        now = time.time()
 
-        if not status["strategy_state"]["running"]:
-            self.notify("status", "critical", "策略已停止运行！", {"running": False})
-            alerts.append("strategy_stopped")
+        # 1. 错误处理与连接监控
+        if "error" in status:
+            error_msg = status["error"]
+            if not self.is_in_error_state:
+                monitor_logger.error(f"无法获取策略状态: {error_msg}")
+                self.notify("status", "danger", f"监控异常: {error_msg}")
+                self.is_in_error_state = True
+            return {"error": error_msg}
+        
+        # 如果恢复正常，重置错误标志
+        if self.is_in_error_state:
+            monitor_logger.info("策略状态获取已恢复正常")
+            self.is_in_error_state = False
 
-        if status["strategy_state"]["paused"]:
-            self.notify("status", "info", "策略当前处于暂停状态", {"paused": True})
-            alerts.append("strategy_paused")
+        # 检查终端连接状态
+        connected = status.get("terminal", {}).get("connected", False)
+        if connected != self.last_terminal_connected:
+            if connected:
+                monitor_logger.info(f"MT5终端已重新连接 (Ping: {status['terminal']['ping']}ms)")
+            else:
+                monitor_logger.error("MT5终端已断开连接！")
+                self.notify("connection", "critical", "MT5终端连接断开")
+            self.last_terminal_connected = connected
 
-        if self.last_status:
-            last_tickets = set()
-            for order in self.last_status["orders"]["buy_orders"] + self.last_status["orders"]["sell_orders"]:
-                last_tickets.add(order["ticket"])
+        # 2. 资金健康度快照 (每小时)
+        if now - self.last_equity_log_time >= self.equity_log_interval:
+            acct = status.get("account", {})
+            monitor_logger.info(
+                f"[资金快照] Balance: {acct.get('balance', 0):.2f} | "
+                f"Equity: {acct.get('equity', 0):.2f} | "
+                f"Margin: {acct.get('margin_level', 0):.2f}%"
+            )
+            self.last_equity_log_time = now
 
-            current_tickets = set()
-            for order in status["orders"]["buy_orders"] + status["orders"]["sell_orders"]:
-                current_tickets.add(order["ticket"])
+        # 3. 订单变动精细追踪
+        current_orders = {}
+        for order in status["orders"]["buy_orders"] + status["orders"]["sell_orders"]:
+            current_orders[order["ticket"]] = order
+        
+        current_tickets = set(current_orders.keys())
+        last_tickets = set(self.last_orders_map.keys())
 
-            if last_tickets != current_tickets:
-                new_orders = current_tickets - last_tickets
-                closed_orders = last_tickets - current_tickets
+        # 检测新开仓
+        new_tickets = current_tickets - last_tickets
+        if new_tickets:
+            # 只有当有新订单时，才去计算一次市场快照（节省资源）
+            market_snapshot = self._capture_market_snapshot()
+            for ticket in new_tickets:
+                order = current_orders[ticket]
+                order_type = "BUY" if order in status["orders"]["buy_orders"] else "SELL"
+                comment = order.get("comment") or ""
+                comment_part = f" comment={comment}" if comment else ""
 
-                msg_parts = []
-                if new_orders:
-                    msg_parts.append(f"新开仓:{len(new_orders)}笔")
-                if closed_orders:
-                    msg_parts.append(f"平仓:{len(closed_orders)}笔")
+                # 日志记录包含市场快照
+                monitor_logger.info(
+                    f"[OPEN] #{ticket} {order_type} {order['volume']} @ {order['price_open']}{comment_part} || {market_snapshot}"
+                )
+                self.notify(
+                    "order_change",
+                    "info",
+                    f"OPEN #{ticket} {order_type} {order['volume']} @ {order['price_open']}",
+                    {
+                        "ticket": ticket,
+                        "type": order_type,
+                        "volume": order["volume"],
+                        "price_open": order["price_open"],
+                        "comment": comment,
+                        "market": market_snapshot
+                    },
+                    alert_key=f"order_change:open:{ticket}"
+                )
 
-                message = f"持仓变动 - {', '.join(msg_parts)}"
-                self.notify("status", "info", message, {
-                    "new_tickets": list(new_orders),
-                    "closed_tickets": list(closed_orders),
-                    "total_positions": len(current_tickets)
-                })
 
+        # 检测平仓
+        closed_tickets = last_tickets - current_tickets
+        if closed_tickets:
+            market_snapshot = self._capture_market_snapshot() # 平仓时也记录环境，分析止盈/止损逻辑
+            for ticket in closed_tickets:
+                last_order = self.last_orders_map[ticket]
+                order_type = "BUY" if ticket in [o["ticket"] for o in self.last_status.get("orders", {}).get("buy_orders", [])] else "SELL"
+                comment = last_order.get("comment") or ""
+                comment_part = f" comment={comment}" if comment else ""
+                monitor_logger.info(
+                    f"[CLOSE] #{ticket} (原持仓: {last_order['volume']} {order_type} @ {last_order['price_open']}{comment_part}) || {market_snapshot}"
+                )
+                self.notify(
+                    "order_change",
+                    "info",
+                    f"CLOSE #{ticket} {order_type} {last_order.get('volume')} @ {last_order.get('price_open')}",
+                    {
+                        "ticket": ticket,
+                        "type": order_type,
+                        "volume": last_order.get("volume"),
+                        "price_open": last_order.get("price_open"),
+                        "comment": comment,
+                        "market": market_snapshot
+                    },
+                    alert_key=f"order_change:close:{ticket}"
+                )
+
+
+        updated_tickets = current_tickets & last_tickets
+        updated_events = []
+        for ticket in updated_tickets:
+            previous = self.last_orders_map[ticket]
+            current = current_orders[ticket]
+            changes = self._order_change_summary(previous, current)
+            if changes:
+                updated_events.append((ticket, changes))
+
+        if updated_events:
+            market_snapshot = self._capture_market_snapshot()
+            for ticket, changes in updated_events:
+                current = current_orders[ticket]
+                monitor_logger.info(
+                    f"[UPDATE] #{ticket} " + "; ".join(changes) + f" || {market_snapshot}"
+                )
+                self.notify(
+                    "order_change",
+                    "info",
+                    f"UPDATE #{ticket} " + "; ".join(changes),
+                    {
+                        "ticket": ticket,
+                        "changes": changes,
+                        "comment": current.get("comment"),
+                        "market": market_snapshot
+                    },
+                    alert_key=f"order_change:update:{ticket}"
+                )
+
+
+        # 更新状态缓存
+        self.last_orders_map = current_orders
         self.last_status = status
-
+        
         return {
-            "running": status["strategy_state"]["running"],
-            "paused": status["strategy_state"]["paused"],
-            "positions": len(status["orders"]["buy_orders"]) + len(status["orders"]["sell_orders"]),
+            "positions": len(current_tickets),
             "profit": status["orders"]["total_profit"],
             "alerts": alerts
         }
-
-    def check_market(self) -> dict:
-        """检查市场状况（技术指标）"""
-        symbol = self.strategy.symbol
-        alerts = []
-
-        try:
-            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 100)
-            if rates is None or len(rates) == 0:
-                return {"error": "无法获取K线数据"}
-
-            closes = [float(r['close']) for r in rates]
-            highs = [float(r['high']) for r in rates]
-            lows = [float(r['low']) for r in rates]
-            current_price = closes[-1]
-
-            # RSI检查
-            rsi = self._calculate_rsi(closes, 14)
-            rsi_value = rsi[-1] if rsi and rsi[-1] else None
-            if rsi_value:
-                if rsi_value > self.config["rsi_overbought"]:
-                    self.notify("market_rsi", "warning",
-                        f"RSI超买警告: {rsi_value:.1f} > {self.config['rsi_overbought']}",
-                        {"rsi": rsi_value, "signal": "overbought"})
-                    alerts.append("rsi_overbought")
-                elif rsi_value < self.config["rsi_oversold"]:
-                    self.notify("market_rsi", "warning",
-                        f"RSI超卖警告: {rsi_value:.1f} < {self.config['rsi_oversold']}",
-                        {"rsi": rsi_value, "signal": "oversold"})
-                    alerts.append("rsi_oversold")
-
-            # ATR波动率检查
-            atr = self._calculate_atr(highs, lows, closes, 14)
-            atr_value = atr[-1] if atr and atr[-1] else None
-            if atr_value:
-                atr_pct = atr_value / current_price * 100
-                if atr_pct > self.config["volatility_high_pct"]:
-                    self.notify("market_volatility", "warning",
-                        f"波动率过高: ATR {atr_pct:.2f}% > {self.config['volatility_high_pct']}%",
-                        {"atr": atr_value, "atr_pct": atr_pct})
-                    alerts.append("high_volatility")
-
-            # MACD检查
-            macd_data = self._calculate_macd(closes)
-            if macd_data and self.config["macd_cross_alert"]:
-                macd_line = macd_data["macd"]
-                signal_line = macd_data["signal"]
-                histogram = macd_data["histogram"]
-
-                if len(macd_line) >= 2 and macd_line[-1] and macd_line[-2] and signal_line[-1] and signal_line[-2]:
-                    # 金叉检测
-                    if macd_line[-2] < signal_line[-2] and macd_line[-1] > signal_line[-1]:
-                        self.notify("market_macd", "info",
-                            "MACD金叉信号",
-                            {"macd": macd_line[-1], "signal": signal_line[-1], "cross": "golden"})
-                        alerts.append("macd_golden_cross")
-                    # 死叉检测
-                    elif macd_line[-2] > signal_line[-2] and macd_line[-1] < signal_line[-1]:
-                        self.notify("market_macd", "info",
-                            "MACD死叉信号",
-                            {"macd": macd_line[-1], "signal": signal_line[-1], "cross": "death"})
-                        alerts.append("macd_death_cross")
-
-            # 布林带偏离检查
-            boll_deviation = self._check_bollinger_deviation(closes, highs, lows)
-            if boll_deviation and abs(boll_deviation) > self.config["martin_disable_boll_dev"]:
-                direction = "上轨" if boll_deviation > 0 else "下轨"
-                self.notify("market_bollinger", "warning",
-                    f"价格接近布林带{direction}，偏离 {abs(boll_deviation):.2f} 倍标准差",
-                    {"deviation": boll_deviation})
-                alerts.append("bollinger_extreme")
-
-            self.last_market_analysis = {
-                "rsi": rsi_value,
-                "atr_pct": atr_pct if atr_value else None,
-                "macd": macd_data["macd"][-1] if macd_data and macd_data["macd"][-1] else None,
-                "boll_deviation": boll_deviation
-            }
-
-            return {"alerts": alerts, "analysis": self.last_market_analysis}
-
-        except Exception as e:
-            monitor_logger.error(f"市场检查失败: {e}")
-            return {"error": str(e)}
-
-    def send_hourly_report(self):
-        """发送每小时巡检报告"""
-        try:
-            status = self.strategy.get_status()
-            symbol = self.strategy.symbol
-
-            # 获取市场数据
-            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 100)
-            if rates is None or len(rates) == 0:
-                monitor_logger.error("无法获取K线数据用于小时报")
-                return
-
-            closes = [float(r['close']) for r in rates]
-            highs = [float(r['high']) for r in rates]
-            lows = [float(r['low']) for r in rates]
-            current_price = closes[-1]
-
-            # 计算指标
-            boll_deviation = self._check_bollinger_deviation(closes, highs, lows) or 0
-            macd_data = self._calculate_macd(closes)
-            macd_val = macd_data["macd"][-1] if macd_data and macd_data["macd"][-1] else 0
-
-            # 策略状态
-            total_profit = status["orders"]["total_profit"]
-            martin_status = self.strategy.get_martin_status()
-            martin_enabled = martin_status.get("martin_enabled", False)
-            seek = status["strategy_state"]["seek"]
-
-            # 构建消息
-            message = (
-                f"定时巡检报告\n"
-                f"当前价格: {current_price:.5f}\n"
-                f"总浮动盈亏: {total_profit:.2f}\n"
-                f"马丁层级: {seek}\n"
-                f"马丁状态: {'开启' if martin_enabled else '关闭'}\n"
-                f"布林带偏离: {boll_deviation:.2f}倍SD\n"
-                f"MACD值: {macd_val:.5f}"
-            )
-
-            data = {
-                "price": current_price,
-                "profit": total_profit,
-                "boll_dev": boll_deviation,
-                "macd": macd_val,
-                "martin_enabled": martin_enabled,
-                "seek": seek
-            }
-
-            self.notify("hourly_report", "info", message, data)
-
-        except Exception as e:
-            monitor_logger.error(f"发送小时报失败: {e}")
-
-    def _calculate_rsi(self, closes: list, period: int = 14) -> list:
-        """计算RSI"""
-        rsi = [None] * period
-        gains, losses = [], []
-
-        for i in range(1, len(closes)):
-            change = closes[i] - closes[i-1]
-            gains.append(max(0, change))
-            losses.append(max(0, -change))
-
-        if len(gains) < period:
-            return [None] * len(closes)
-
-        avg_gain = sum(gains[:period]) / period
-        avg_loss = sum(losses[:period]) / period
-
-        if avg_loss == 0:
-            rsi.append(100)
-        else:
-            rs = avg_gain / avg_loss
-            rsi.append(100 - (100 / (1 + rs)))
-
-        for i in range(period, len(gains)):
-            avg_gain = (avg_gain * (period-1) + gains[i]) / period
-            avg_loss = (avg_loss * (period-1) + losses[i]) / period
-
-            if avg_loss == 0:
-                rsi.append(100)
-            else:
-                rs = avg_gain / avg_loss
-                rsi.append(100 - (100 / (1 + rs)))
-
-        return rsi
-
-    def _calculate_atr(self, highs: list, lows: list, closes: list, period: int = 14) -> list:
-        """计算ATR"""
-        tr = []
-        for i in range(len(closes)):
-            if i == 0:
-                tr.append(highs[i] - lows[i])
-            else:
-                tr.append(max(
-                    highs[i] - lows[i],
-                    abs(highs[i] - closes[i-1]),
-                    abs(lows[i] - closes[i-1])
-                ))
-
-        atr = [None] * (period - 1)
-        atr.append(sum(tr[:period]) / period)
-
-        for i in range(period, len(tr)):
-            atr.append((atr[-1] * (period - 1) + tr[i]) / period)
-
-        return atr
-
-    def _calculate_macd(self, closes: list, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
-        """计算MACD"""
-        def ema(data, period):
-            result = []
-            multiplier = 2 / (period + 1)
-            for i in range(len(data)):
-                if i == 0:
-                    result.append(data[0])
-                else:
-                    result.append((data[i] - result[-1]) * multiplier + result[-1])
-            return result
-
-        ema_fast = ema(closes, fast)
-        ema_slow = ema(closes, slow)
-
-        macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
-
-        signal_line = ema(macd_line, signal)
-        histogram = [m - s for m, s in zip(macd_line, signal_line)]
-
-        return {"macd": macd_line, "signal": signal_line, "histogram": histogram}
-
-    def _check_bollinger_deviation(self, closes: list, highs: list, lows: list, period: int = 20, std_dev: float = 2.0):
-        """检查布林带偏离程度"""
-        if len(closes) < period:
-            return None
-
-        window = closes[-period:]
-        middle = sum(window) / period
-        variance = sum((x - middle) ** 2 for x in window) / period
-        std = variance ** 0.5
-
-        if std == 0:
-            return None
-
-        current_price = closes[-1]
-        deviation = (current_price - middle) / std
-
-        return deviation
 
     def run(self):
         """启动监控循环"""
         monitor_logger.info("监控服务启动")
 
         last_risk_check = 0
-        last_market_check = 0
         last_status_check = 0
 
         while True:
-            now = time.time()
+            now_ts = time.time()
 
             try:
                 # 状态检查（最频繁）
-                if now - last_status_check >= self.config["status_check_interval"]:
+                if now_ts - last_status_check >= self.config["status_check_interval"]:
                     self.check_status()
-                    last_status_check = now
+                    last_status_check = now_ts
 
                 # 风险检查
-                if now - last_risk_check >= self.config["risk_check_interval"]:
+                if now_ts - last_risk_check >= self.config["risk_check_interval"]:
                     self.check_risk()
-                    last_risk_check = now
-
-                # 市场检查
-                if now - last_market_check >= self.config["market_check_interval"]:
-                    self.check_market()
-                    last_market_check = now
-
-                # 小时巡检报告
-                if now - self.last_hourly_report_time >= self.config["hourly_report_interval"]:
-                    if self.last_hourly_report_time == 0:
-                        # 首次运行等一个周期再发送
-                        self.last_hourly_report_time = now
-                    else:
-                        self.send_hourly_report()
-                        self.last_hourly_report_time = now
+                    last_risk_check = now_ts
 
             except Exception as e:
                 monitor_logger.error(f"监控检查失败: {e}")
@@ -1503,19 +1458,20 @@ class AgentCallback:
 级别: {event['level'].upper()}
 时间: {event['timestamp']}
 消息: {event['message']}
-数据: {json.dumps(event.get('data', {}), ensure_ascii=False)}
-
-请分析此预警并给出建议。"""
+数据: {json.dumps(event.get('data', {}), ensure_ascii=False)}"""
 
             headers = {
                 'Content-Type': 'application/json',
                 'Authorization': f'Bearer {self.api_key}',
             }
 
+            no_reply = True
             data = {
                 'model': self.model,
                 'messages': [{'role': self.role, 'content': prompt}],
-                'stream': True
+                'stream': True,
+                'no_reply': no_reply,
+                'info': True
             }
 
             response = requests.post(self.url, headers=headers, data=json.dumps(data), stream=True, timeout=30)
@@ -1541,59 +1497,10 @@ def log_request():
     return decorator
 
 
-@app.route('/status')
-@log_request()
-def get_status():
-    if strategy_instance is None:
-        return jsonify({"error": "策略未初始化"})
-    return jsonify(strategy_instance.get_status())
 
 
-@app.route('/pause', methods=['POST'])
-@log_request()
-def pause_strategy():
-    if strategy_instance is None:
-        return jsonify({"error": "策略未初始化"})
-    strategy_instance.paused = True
-    return jsonify({"message": "策略已暂停"})
 
 
-@app.route('/resume', methods=['POST'])
-@log_request()
-def resume_strategy():
-    if strategy_instance is None:
-        return jsonify({"error": "策略未初始化"})
-    strategy_instance.paused = False
-    return jsonify({"message": "策略已继续"})
-
-
-@app.route('/close_all', methods=['POST'])
-@log_request()
-def close_all_orders():
-    if strategy_instance is None:
-        return jsonify({"error": "策略未初始化"})
-    strategy_instance.close_all_orders()
-    return jsonify({"message": "所有订单已平仓"})
-
-
-@app.route('/profit')
-@log_request()
-def get_profit():
-    if strategy_instance is None:
-        return jsonify({"error": "策略未初始化"})
-    days = request.args.get('days', type=int, default=30)
-    start_time = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    result = strategy_instance.get_profit_history(start_time=start_time, end_time=end_time)
-    return jsonify(result)
-
-
-@app.route('/config')
-@log_request()
-def get_config():
-    if strategy_instance is None:
-        return jsonify({"error": "策略未初始化"})
-    return jsonify(strategy_instance.get_config_info())
 
 
 def run_flask():
@@ -1615,55 +1522,392 @@ def get_file_content(file_path: str) -> str:
 
 
 def get_strategy():
-    """获取策略实例"""
+    """获取交易上下文实例"""
     global strategy_instance
     if strategy_instance is None:
-        raise RuntimeError("策略实例未初始化")
+        raise RuntimeError("交易上下文未初始化")
     return strategy_instance
 
 
-def get_strategy_documentation() -> str:
-    """获取策略逻辑文档"""
-    return '''# EasyDeal 交易策略逻辑文档
-
-## 策略概述
-
-EasyDeal 是一个基于 MetaTrader 5 的双向爬梯+马丁格尔自动交易策略。
-
-## 核心机制
-
-### 1. 双向开仓入场
-策略启动后同时开立 BUY 和 SELL 两个基础单（手数为 `first_lots`），形成对冲结构。
-
-### 2. 爬梯止盈机制
-当某个方向的基础单盈利达到 `step`% 时：
-1. 平掉该盈利单
-2. 在当前价位重新开立同方向基础单
-3. 锁定该方向为跟踪方向（`follow_type`）
-
-### 3. 马丁格尔加仓机制
-当跟踪方向确定后，如果逆势方向出现较大亏损，触发马丁加仓。
-
-### 4. 马丁单平仓逻辑
-当所有马丁单 + 对应方向基础单的总利润 >= 0 时：
-1. 平掉所有马丁单
-2. 平掉同向基础单
-3. 开新的基础单，开始新一轮循环
-
-## 关键参数说明
-
-| 参数 | 说明 |
-|------|------|
-| `first_lots` | 基础单手数 |
-| `step` | 爬梯步长(%) |
-| `martin_interval` | 马丁间隔(%) |
-| `filter` | 过滤百分比(%) |
-| `max_martin_level` | 最大马丁层数 |
-| `max_loss` | 最大浮亏 |
-'''
+def _get_strategy_doc_path(date: datetime | None = None) -> str:
+    path = os.getenv("EA_STRATEGY_DOC_PATH")
+    if path:
+        return path
+    current = date or datetime.now()
+    day_dir = os.path.join(log_directory, current.strftime("%Y-%m-%d"))
+    return os.path.join(day_dir, "strategy_doc_latest.md")
 
 
-# ============== 时间周期映射 ==============
+def _read_strategy_doc(path: str) -> str:
+    if not path or not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def get_strategy_documentation_base() -> str:
+    """Return the last inferred strategy documentation, if any."""
+    return _read_strategy_doc(_get_strategy_doc_path())
+
+
+def _read_recent_lines(file_path: str, limit: int = 200, date_prefix: str = None, keywords: list = None) -> list:
+    if not file_path or not os.path.exists(file_path):
+        return []
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except Exception:
+        return []
+    if date_prefix:
+        lines = [line for line in lines if line.startswith(date_prefix)]
+    if keywords:
+        lines = [line for line in lines if any(keyword in line for keyword in keywords)]
+    if limit and len(lines) > limit:
+        lines = lines[-limit:]
+    return [line.strip() for line in lines if line.strip()]
+
+
+def _read_monitor_events(date_prefix: str = None, limit: int = 100) -> list:
+    events = []
+    events_path = os.path.join(log_directory, "monitor_events.jsonl")
+    if not os.path.exists(events_path):
+        return events
+    try:
+        with open(events_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except Exception:
+        return events
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except Exception:
+            continue
+        ts = str(data.get("timestamp", ""))
+        if date_prefix and not ts.startswith(date_prefix):
+            continue
+        events.append({
+            "timestamp": ts,
+            "event_type": data.get("event_type"),
+            "level": data.get("level"),
+            "message": data.get("message"),
+            "data": data.get("data", {})
+        })
+    if limit and len(events) > limit:
+        events = events[-limit:]
+    return events
+
+
+def _read_conversation_context(date_prefix: str, limit: int = 50, override_path: str = None) -> list:
+    path = override_path or os.getenv("EA_CONVERSATION_PATH")
+    if path and os.path.exists(path):
+        return _read_recent_lines(path, limit=limit)
+    return _read_recent_lines(log_file, limit=limit, date_prefix=date_prefix, keywords=["\u6536\u5230\u5de5\u5177\u8c03\u7528\u8bf7\u6c42", "Tool call"])
+
+
+def _fetch_chat_history(date_prefix: str = None, limit: int = 200) -> list:
+    url = os.getenv("FAY_MSG_API_URL", "http://127.0.0.1:5000/api/get-msg")
+    try:
+        payload = {"limit": int(limit) if limit else 200}
+    except (TypeError, ValueError):
+        payload = {"limit": 200}
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+    except Exception:
+        return []
+    if response.status_code != 200:
+        return []
+    try:
+        data = response.json()
+    except Exception:
+        return []
+    items = data.get("list", [])
+    if not isinstance(items, list):
+        return []
+    if date_prefix:
+        filtered = []
+        for item in items:
+            timetext = str(item.get("timetext", ""))
+            if timetext.startswith(date_prefix):
+                filtered.append(item)
+        items = filtered
+    lines = []
+    for item in items[-payload["limit"]:]:
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        timetext = str(item.get("timetext", "")).strip()
+        username = str(item.get("username", "")).strip()
+        msg_type = str(item.get("type", "")).strip()
+        way = str(item.get("way", "")).strip()
+        prefix_parts = [part for part in [timetext, username, msg_type, way] if part]
+        prefix = " ".join(prefix_parts)
+        if prefix:
+            lines.append(f"{prefix}: {content}")
+        else:
+            lines.append(content)
+    return lines
+
+
+def _build_strategy_prompt(strategy, context: dict, base_doc: str) -> str:
+    status = context.get("status", {})
+    summary = status.get("orders", {}).get("summary", {})
+    account = status.get("account", {})
+    config = context.get("config", {})
+
+    prompt_sections = [
+        "你是交易策略分析师，请基于提供的信息推测EA的交易逻辑。",
+        "注意：参数不等于规则；仅在有直接证据时引用。不要臆造指标或条件。",
+        "请输出以下内容：",
+        "1) 摘要",
+        "2) 开仓/加仓/平仓假设",
+        "3) 证据（引用日志/订单变化/参数）",
+        "4) 未确定项或反例",
+        "5) 下一步可能行为",
+        "6) 需要补充的数据",
+        "## 账户与持仓",
+        json.dumps({
+            "balance": account.get("balance"),
+            "equity": account.get("equity"),
+            "margin_level": account.get("margin_level"),
+            "positions": summary
+        }, ensure_ascii=False, indent=2),
+        "## 监控配置",
+        json.dumps(config, ensure_ascii=False, indent=2),
+    ]
+
+    order_logs = context.get("order_logs", [])
+    if order_logs:
+        prompt_sections.append("## 今日订单变化")
+        prompt_sections.append("\n".join(order_logs))
+
+    log_lines = context.get("log_lines", [])
+    if log_lines:
+        prompt_sections.append("## 今日关键日志")
+        prompt_sections.append("\n".join(log_lines))
+
+    events = context.get("events", [])
+    if events:
+        prompt_sections.append("## 今日监控事件")
+        prompt_sections.append(json.dumps(events, ensure_ascii=False, indent=2))
+
+    conversation = context.get("conversation", [])
+    if conversation:
+        prompt_sections.append("## 今日对话/工具调用")
+        prompt_sections.append("\n".join(conversation))
+
+    chat_records = context.get("chat_records", [])
+    if chat_records:
+        prompt_sections.append("## 最近聊天记录")
+        prompt_sections.append("\n".join(chat_records))
+
+    if base_doc:
+        prompt_sections.append("## 历史推测记录")
+        prompt_sections.append(base_doc)
+
+    return "\n".join(prompt_sections)
+
+
+def _extract_fay_content(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    choices = payload.get("choices") or []
+    if choices:
+        choice = choices[0]
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if content:
+            return content
+        delta = choice.get("delta") or {}
+        if delta.get("content"):
+            return delta["content"]
+    if payload.get("text"):
+        return payload["text"]
+    return ""
+
+
+def _query_fay(prompt: str, observation: str = "") -> tuple:
+    url = os.getenv("FAY_API_URL", "http://127.0.0.1:5000/v1/chat/completions")
+    api_key = os.getenv("FAY_API_KEY", "YOUR_API_KEY")
+    model = os.getenv("FAY_MODEL", "llm")
+    username = "user"
+
+    payload = {
+        "model": model,
+        "messages": [{"role": username, "content": prompt}],
+        "stream": True,
+        "observation": observation or ""
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(payload), stream=True, timeout=30)
+    except Exception as exc:
+        return False, f"Fay request failed: {exc}"
+
+    if response.status_code != 200:
+        return False, f"Fay request failed: {response.status_code}"
+
+    content_chunks = []
+    try:
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            line = line.strip()
+            payload_text = line
+            if line.startswith("data:"):
+                payload_text = line[5:].strip()
+            if payload_text == "[DONE]":
+                break
+            try:
+                data = json.loads(payload_text)
+            except Exception:
+                continue
+            content = _extract_fay_content(data)
+            if content:
+                content_chunks.append(content)
+    except Exception:
+        content_chunks = []
+
+    if content_chunks:
+        return True, "".join(content_chunks)
+
+    try:
+        data = response.json()
+        content = _extract_fay_content(data)
+        if content:
+            return True, content
+    except Exception:
+        pass
+
+    text = (response.text or "").strip()
+    if text:
+        return True, text
+
+    return False, "Empty Fay response"
+
+
+def _persist_strategy_doc(content: str, date: datetime | None = None) -> None:
+    if not content:
+        return
+    path = _get_strategy_doc_path(date)
+    dir_path = os.path.dirname(path)
+    if dir_path and not os.path.exists(dir_path):
+        os.makedirs(dir_path, exist_ok=True)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as exc:
+        logging.warning("Failed to persist strategy doc: %s", exc)
+
+
+def _seconds_until_next_doc_update(now: datetime | None = None) -> float:
+    current = now or datetime.now()
+    target = current.replace(hour=0, minute=15, second=0, microsecond=0)
+    if current >= target:
+        target += timedelta(days=1)
+    seconds = (target - current).total_seconds()
+    return max(seconds, 1.0)
+
+
+def _strategy_doc_persist_loop() -> None:
+    while True:
+        try:
+            wait_seconds = _seconds_until_next_doc_update()
+            logging.info("Strategy doc refresh scheduled in %s seconds", int(wait_seconds))
+            time.sleep(wait_seconds)
+            try:
+                strategy = get_strategy()
+            except Exception as exc:
+                logging.warning("Strategy doc refresh skipped: %s", exc)
+                continue
+            ok, doc = generate_strategy_documentation(strategy)
+            if ok:
+                _persist_strategy_doc(doc)
+                logging.info("Strategy doc updated")
+            else:
+                logging.warning("Strategy doc refresh failed: %s", doc)
+        except Exception as exc:
+            logging.warning("Strategy doc refresh loop error: %s", exc)
+            time.sleep(60)
+
+
+def generate_strategy_documentation(strategy, arguments: dict = None) -> tuple:
+    arguments = arguments or {}
+    date_prefix = datetime.now().strftime("%Y-%m-%d")
+
+    order_logs = _read_recent_lines(
+        log_file,
+        limit=200,
+        date_prefix=date_prefix,
+        keywords=["[OPEN]", "[CLOSE]", "[UPDATE]"]
+    )
+    log_lines = _read_recent_lines(
+        log_file,
+        limit=100,
+        date_prefix=date_prefix,
+        keywords=["WARNING", "ERROR", "indicator_report", "risk_loss", "order_change"]
+    )
+    events = _read_monitor_events(date_prefix=date_prefix, limit=50)
+
+    conversation = []
+    conversation_text = arguments.get("conversation")
+    conversation_path = arguments.get("conversation_path")
+    if conversation_text:
+        if isinstance(conversation_text, list):
+            conversation = [str(item) for item in conversation_text]
+        else:
+            conversation = [str(conversation_text)]
+    else:
+        conversation = _read_conversation_context(date_prefix, limit=50, override_path=conversation_path)
+
+    try:
+        msg_limit = int(os.getenv("FAY_MSG_LIMIT", "200"))
+    except (TypeError, ValueError):
+        msg_limit = 200
+    chat_records = _fetch_chat_history(date_prefix=date_prefix, limit=msg_limit)
+
+    context = {
+        "status": strategy.get_status(),
+        "config": strategy.get_config_info(),
+        "order_logs": order_logs,
+        "log_lines": log_lines,
+        "events": events,
+        "conversation": conversation,
+        "chat_records": chat_records
+    }
+
+    base_doc = get_strategy_documentation_base()
+    prompt = _build_strategy_prompt(strategy, context, base_doc)
+    observation = json.dumps(context, ensure_ascii=False)
+    ok, result = _query_fay(prompt, observation)
+    if ok:
+        return True, result
+    if base_doc:
+        return False, base_doc + "\n\n[LLM推测失败] " + str(result)
+    return False, "[LLM推测失败] " + str(result)
+
+
+def _get_or_generate_strategy_doc(strategy, arguments: dict | None = None) -> tuple:
+    doc = get_strategy_documentation_base()
+    if doc:
+        return True, doc
+    ok, generated = generate_strategy_documentation(strategy, arguments)
+    if ok:
+        _persist_strategy_doc(generated)
+        return True, generated
+    return False, generated
+
 
 TIMEFRAME_MAP = {
     "M1": mt5.TIMEFRAME_M1,
@@ -1678,279 +1922,79 @@ TIMEFRAME_MAP = {
 }
 
 
-# ============== 技术指标计算函数 ==============
-
-def calculate_ma(closes: list, period: int) -> list:
-    """计算简单移动平均线"""
-    ma = []
-    for i in range(len(closes)):
-        if i < period - 1:
-            ma.append(None)
-        else:
-            ma.append(sum(closes[i - period + 1:i + 1]) / period)
-    return ma
-
-
-def calculate_ema(closes: list, period: int) -> list:
-    """计算指数移动平均线"""
-    ema = []
-    multiplier = 2 / (period + 1)
-    for i in range(len(closes)):
-        if i == 0:
-            ema.append(closes[0])
-        else:
-            ema.append((closes[i] - ema[-1]) * multiplier + ema[-1])
-    return ema
-
-
-def calculate_rsi(closes: list, period: int = 14) -> list:
-    """计算相对强弱指标"""
-    rsi = [None] * period
-    gains = []
-    losses = []
-
-    for i in range(1, len(closes)):
-        change = closes[i] - closes[i - 1]
-        gains.append(max(0, change))
-        losses.append(max(0, -change))
-
-    if len(gains) < period:
-        return [None] * len(closes)
-
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-
-    if avg_loss == 0:
-        rsi.append(100)
-    else:
-        rs = avg_gain / avg_loss
-        rsi.append(100 - (100 / (1 + rs)))
-
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-
-        if avg_loss == 0:
-            rsi.append(100)
-        else:
-            rs = avg_gain / avg_loss
-            rsi.append(100 - (100 / (1 + rs)))
-
-    return rsi
-
-
-def calculate_macd(closes: list, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
-    """计算MACD指标"""
-    ema_fast = calculate_ema(closes, fast)
-    ema_slow = calculate_ema(closes, slow)
-
-    macd_line = [f - s if f and s else None for f, s in zip(ema_fast, ema_slow)]
-
-    valid_macd = [m for m in macd_line if m is not None]
-    if len(valid_macd) >= signal:
-        signal_line = [None] * (len(macd_line) - len(valid_macd))
-        signal_ema = calculate_ema(valid_macd, signal)
-        signal_line.extend(signal_ema)
-    else:
-        signal_line = [None] * len(macd_line)
-
-    histogram = [m - s if m and s else None for m, s in zip(macd_line, signal_line)]
-
-    return {"macd": macd_line, "signal": signal_line, "histogram": histogram}
-
-
-def calculate_bollinger(closes: list, period: int = 20, std_dev: float = 2.0) -> dict:
-    """计算布林带"""
-    ma = calculate_ma(closes, period)
-    upper = []
-    lower = []
-
-    for i in range(len(closes)):
-        if i < period - 1:
-            upper.append(None)
-            lower.append(None)
-        else:
-            window = closes[i - period + 1:i + 1]
-            mean = ma[i]
-            variance = sum((x - mean) ** 2 for x in window) / period
-            std = variance ** 0.5
-            upper.append(mean + std_dev * std)
-            lower.append(mean - std_dev * std)
-
-    return {"middle": ma, "upper": upper, "lower": lower}
-
-
-def calculate_atr(highs: list, lows: list, closes: list, period: int = 14) -> list:
-    """计算真实波幅均值"""
-    tr = []
-    for i in range(len(closes)):
-        if i == 0:
-            tr.append(highs[i] - lows[i])
-        else:
-            tr.append(max(
-                highs[i] - lows[i],
-                abs(highs[i] - closes[i - 1]),
-                abs(lows[i] - closes[i - 1])
-            ))
-
-    atr = [None] * (period - 1)
-    atr.append(sum(tr[:period]) / period)
-
-    for i in range(period, len(tr)):
-        atr.append((atr[-1] * (period - 1) + tr[i]) / period)
-
-    return atr
-
-
 # ============== MCP 工具定义 ==============
 
+# ============== MCP tools ==============
+
+# ============== MCP tools ==============
+
 def get_all_tools() -> list[Tool]:
-    """获取所有可用的交易工具列表"""
+    """Return all available MCP tools."""
     return [
         Tool(
-            name="get_trading_status",
-            description="获取当前交易策略的完整状态，包括市场数据、策略状态、马丁状态、持仓订单和总利润",
-            inputSchema={"type": "object", "properties": {}, "required": []}
-        ),
-        Tool(
-            name="get_market_info",
-            description="获取当前交易品种的实时行情信息（买价、卖价、点差）",
-            inputSchema={"type": "object", "properties": {}, "required": []}
-        ),
-        Tool(
-            name="get_config",
-            description="获取策略的配置参数，包括交易品种、手数、步长、马丁间隔等",
-            inputSchema={"type": "object", "properties": {}, "required": []}
-        ),
-        Tool(
-            name="get_strategy_documentation",
-            description="获取策略逻辑文档，包含爬梯/马丁规则说明",
-            inputSchema={"type": "object", "properties": {}, "required": []}
-        ),
-        Tool(
-            name="pause_strategy",
-            description="暂停交易策略，策略将停止开新仓位但保留现有持仓",
-            inputSchema={"type": "object", "properties": {}, "required": []}
-        ),
-        Tool(
-            name="resume_strategy",
-            description="恢复已暂停的交易策略",
-            inputSchema={"type": "object", "properties": {}, "required": []}
-        ),
-        Tool(
-            name="close_all_positions",
-            description="平掉所有当前持仓订单（危险操作，需谨慎使用）",
+            name="get_trading_logs",
+            description="Fetch trading logs for a date with an optional type filter.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "confirm": {"type": "boolean", "description": "确认执行平仓操作，必须设为true才会执行"}
-                },
-                "required": ["confirm"]
-            }
-        ),
-        Tool(
-            name="get_profit_history",
-            description="获取指定天数内的交易收益历史和统计数据",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "days": {"type": "integer", "description": "查询的天数，默认30天", "default": 30}
-                },
-                "required": []
-            }
-        ),
-        Tool(
-            name="analyze_risk",
-            description="分析当前持仓的风险状况，包括浮亏、马丁层级、距离止损的距离",
-            inputSchema={"type": "object", "properties": {}, "required": []}
-        ),
-        Tool(
-            name="get_position_details",
-            description="获取所有持仓订单的详细信息",
-            inputSchema={"type": "object", "properties": {}, "required": []}
-        ),
-        Tool(
-            name="update_config",
-            description="更新策略配置参数（运行时生效，不持久化）",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "max_loss": {"type": "number", "description": "最大浮亏限制"},
-                    "max_martin_level": {"type": "integer", "description": "最大马丁层数"},
-                    "step": {"type": "number", "description": "爬梯步长百分比"},
-                    "martin_interval": {"type": "number", "description": "马丁加仓间隔"},
-                    "filter": {"type": "number", "description": "过滤百分比"}
-                },
-                "required": []
-            }
-        ),
-        Tool(
-            name="get_klines",
-            description="获取K线/蜡烛图数据，支持多种时间周期",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "timeframe": {
+                    "date": {
                         "type": "string",
-                        "description": "K线周期",
-                        "enum": ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"],
-                        "default": "H1"
+                        "description": "Date in YYYY-MM-DD; defaults to today.",
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
                     },
-                    "count": {"type": "integer", "description": "获取的K线数量", "default": 100}
-                },
-                "required": []
-            }
-        ),
-        Tool(
-            name="get_technical_indicators",
-            description="获取常用技术指标数据，包括MA、RSI、MACD、布林带等",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "timeframe": {
+                    "type": {
                         "type": "string",
-                        "enum": ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"],
-                        "default": "H1"
+                        "description": "Log filter.",
+                        "enum": ["ALL", "OPEN", "CLOSE", "UPDATE", "WARNING", "ERROR"],
+                        "default": "ALL"
                     },
-                    "indicators": {
-                        "type": "array",
-                        "items": {"type": "string", "enum": ["MA", "EMA", "RSI", "MACD", "BOLL", "ATR"]},
-                        "default": ["MA", "RSI", "MACD"]
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max number of lines from the end.",
+                        "default": 100
                     }
                 },
                 "required": []
             }
         ),
         Tool(
-            name="get_martin_status",
-            description="获取马丁策略状态，包括是否启用、当前层级、波动率指标等",
+            name="get_trading_status",
+            description="Get current account, positions, and market snapshot.",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
         Tool(
-            name="enable_martin",
-            description="启用马丁加仓功能",
+            name="get_market_info",
+            description="Get current market info for the configured symbol.",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
         Tool(
-            name="disable_martin",
-            description="禁用马丁加仓功能",
+            name="get_config",
+            description="Get monitor configuration and loaded parameters.",
+            inputSchema={"type": "object", "properties": {}, "required": []}
+        ),
+        Tool(
+            name="get_strategy_documentation",
+            description="基于日志/订单/参数/对话等信息推测并生成策略的判断与描述。",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "reason": {"type": "string", "description": "禁用原因", "default": "手动禁用"}
+                    "conversation": {"type": "string", "description": "Optional conversation context."},
+                    "conversation_path": {"type": "string", "description": "Optional path to a conversation log file."}
                 },
                 "required": []
             }
         ),
         Tool(
-            name="notify_owner",
-            description="通知主人（发送消息给Fay数字人进行播报）",
+            name="get_profit_history",
+            description="Get profit history and summary for a time window.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "message": {"type": "string", "description": "要发送的消息内容"}
+                    "days": {"type": "integer", "description": "Lookback days", "default": 30},
+                    "start_time": {"type": "string", "description": "YYYY-MM-DD HH:MM:SS"},
+                    "end_time": {"type": "string", "description": "YYYY-MM-DD HH:MM:SS"}
                 },
-                "required": ["message"]
+                "required": []
             }
         ),
     ]
@@ -1958,538 +2002,247 @@ def get_all_tools() -> list[Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-    """执行工具调用"""
+    """Execute tool calls."""
     try:
         strategy = get_strategy()
+        arguments = arguments or {}
+
+        if name == "get_trading_logs":
+            date_prefix = arguments.get("date") or datetime.now().strftime("%Y-%m-%d")
+            log_type = str(arguments.get("type", "ALL")).upper()
+            limit = int(arguments.get("limit", 100))
+
+            keywords = None
+            if log_type == "OPEN":
+                keywords = ["[OPEN]"]
+            elif log_type == "CLOSE":
+                keywords = ["[CLOSE]"]
+            elif log_type == "UPDATE":
+                keywords = ["[UPDATE]"]
+            elif log_type == "WARNING":
+                keywords = ["WARNING"]
+            elif log_type == "ERROR":
+                keywords = ["ERROR"]
+
+            lines = _read_recent_lines(
+                log_file,
+                limit=limit,
+                date_prefix=date_prefix,
+                keywords=keywords
+            )
+            result = {"date": date_prefix, "type": log_type, "count": len(lines), "lines": lines}
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         if name == "get_trading_status":
             status = strategy.get_status()
-            martin_status = strategy.get_martin_status()
-            status["martin_status"] = martin_status
             return [TextContent(type="text", text=json.dumps(status, ensure_ascii=False, indent=2))]
 
-        elif name == "get_market_info":
+        if name == "get_market_info":
             symbol_info = mt5.symbol_info(strategy.symbol)
             if symbol_info is None:
-                return [TextContent(type="text", text=json.dumps({"error": "无法获取行情数据"}, ensure_ascii=False))]
-
+                return [TextContent(type="text", text=json.dumps({"error": "market info unavailable"}, ensure_ascii=False))]
             market_info = {
                 "symbol": strategy.symbol,
                 "bid": symbol_info.bid,
                 "ask": symbol_info.ask,
                 "spread": symbol_info.spread,
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             return [TextContent(type="text", text=json.dumps(market_info, ensure_ascii=False, indent=2))]
 
-        elif name == "get_config":
+        if name == "get_config":
             config = strategy.get_config_info()
-            return [TextContent(type="text", text=json.dumps(config, ensure_ascii=False, indent=2))]
+            return ([], config)
 
-        elif name == "get_strategy_documentation":
-            doc = get_strategy_documentation()
+        if name == "get_strategy_documentation":
+            ok, doc = _get_or_generate_strategy_doc(strategy, arguments)
             return [TextContent(type="text", text=doc)]
 
-        elif name == "pause_strategy":
-            strategy.paused = True
-            logging.info("策略已暂停 (via MCP)")
-            return [TextContent(type="text", text=json.dumps({
-                "success": True, "message": "策略已暂停", "paused": True
-            }, ensure_ascii=False))]
-
-        elif name == "resume_strategy":
-            strategy.paused = False
-            logging.info("策略已恢复 (via MCP)")
-            return [TextContent(type="text", text=json.dumps({
-                "success": True, "message": "策略已恢复运行", "paused": False
-            }, ensure_ascii=False))]
-
-        elif name == "close_all_positions":
-            confirm = arguments.get("confirm", False)
-            if not confirm:
-                return [TextContent(type="text", text=json.dumps({
-                    "success": False, "message": "操作未确认，请设置 confirm=true 来执行平仓"
-                }, ensure_ascii=False))]
-
-            result = strategy.close_all_orders()
-            logging.warning("执行全部平仓 (via MCP)")
-            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
-
-        elif name == "get_profit_history":
-            days = arguments.get("days", 30)
-            start_time = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-            end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if name == "get_profit_history":
+            start_time = arguments.get("start_time")
+            end_time = arguments.get("end_time")
+            if not start_time and not end_time:
+                days = int(arguments.get("days", 30))
+                end_dt = datetime.now()
+                start_dt = end_dt - timedelta(days=days)
+                start_time = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+                end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
             result = strategy.get_profit_history(start_time=start_time, end_time=end_time)
             return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
-        elif name == "analyze_risk":
-            status = strategy.get_status()
-            config = strategy.get_config_info()
+        return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}, ensure_ascii=False))]
 
-            total_profit = status["orders"]["total_profit"]
-            max_loss = config["parameters"]["max_loss"]
-            martin_level = strategy.seek
-            max_martin_level = config["parameters"]["max_martin_level"]
-
-            loss_ratio = abs(total_profit) / max_loss * 100 if total_profit < 0 else 0
-            martin_ratio = martin_level / max_martin_level * 100
-
-            risk_level = "低"
-            if loss_ratio > 50 or martin_ratio > 60:
-                risk_level = "高"
-            elif loss_ratio > 30 or martin_ratio > 40:
-                risk_level = "中"
-
-            risk_analysis = {
-                "risk_level": risk_level,
-                "floating_profit": total_profit,
-                "max_loss_limit": max_loss,
-                "loss_percentage": round(loss_ratio, 2),
-                "martin_level": martin_level,
-                "max_martin_level": max_martin_level,
-                "martin_percentage": round(martin_ratio, 2),
-                "recommendations": []
-            }
-
-            if loss_ratio > 70:
-                risk_analysis["recommendations"].append("浮亏接近止损线，建议考虑手动干预")
-            if martin_ratio > 80:
-                risk_analysis["recommendations"].append("马丁层级接近上限，建议密切关注")
-            if not risk_analysis["recommendations"]:
-                risk_analysis["recommendations"].append("当前风险可控，策略运行正常")
-
-            return [TextContent(type="text", text=json.dumps(risk_analysis, ensure_ascii=False, indent=2))]
-
-        elif name == "get_position_details":
-            positions = mt5.positions_get(symbol=strategy.symbol)
-            if positions is None:
-                return [TextContent(type="text", text=json.dumps({
-                    "success": False, "message": "无法获取持仓信息"
-                }, ensure_ascii=False))]
-
-            position_list = []
-            for pos in positions:
-                if pos.magic == strategy.magic_number:
-                    pos_type = "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL"
-                    is_martin = pos.ticket in strategy.martin_orders
-
-                    position_list.append({
-                        "ticket": pos.ticket,
-                        "type": pos_type,
-                        "volume": pos.volume,
-                        "open_price": pos.price_open,
-                        "current_price": pos.price_current,
-                        "profit": pos.profit,
-                        "is_martin_order": is_martin
-                    })
-
-            result = {
-                "total_positions": len(position_list),
-                "total_profit": sum(p["profit"] for p in position_list),
-                "positions": position_list
-            }
-
-            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
-
-        elif name == "update_config":
-            updated = []
-
-            if "max_loss" in arguments:
-                strategy.max_loss = arguments["max_loss"]
-                updated.append(f"max_loss = {arguments['max_loss']}")
-
-            if "max_martin_level" in arguments:
-                strategy.max_martin_level = arguments["max_martin_level"]
-                updated.append(f"max_martin_level = {arguments['max_martin_level']}")
-
-            if "step" in arguments:
-                strategy.step = arguments["step"]
-                updated.append(f"step = {arguments['step']}")
-
-            if "martin_interval" in arguments:
-                strategy.martin_interval = arguments["martin_interval"]
-                updated.append(f"martin_interval = {arguments['martin_interval']}")
-
-            if "filter" in arguments:
-                strategy.filter = arguments["filter"]
-                updated.append(f"filter = {arguments['filter']}")
-
-            if updated:
-                logging.info(f"配置已更新 (via MCP): {', '.join(updated)}")
-                return [TextContent(type="text", text=json.dumps({
-                    "success": True, "message": "配置已更新", "updated": updated
-                }, ensure_ascii=False, indent=2))]
-            else:
-                return [TextContent(type="text", text=json.dumps({
-                    "success": False, "message": "没有提供需要更新的参数"
-                }, ensure_ascii=False))]
-
-        elif name == "get_klines":
-            timeframe_str = arguments.get("timeframe", "H1")
-            count = min(arguments.get("count", 100), 1000)
-
-            timeframe = TIMEFRAME_MAP.get(timeframe_str)
-            if timeframe is None:
-                return [TextContent(type="text", text=json.dumps({
-                    "error": f"不支持的时间周期: {timeframe_str}"
-                }, ensure_ascii=False))]
-
-            rates = mt5.copy_rates_from_pos(strategy.symbol, timeframe, 0, count)
-            if rates is None or len(rates) == 0:
-                return [TextContent(type="text", text=json.dumps({"error": "无法获取K线数据"}, ensure_ascii=False))]
-
-            klines = []
-            for rate in rates:
-                klines.append({
-                    "time": datetime.fromtimestamp(rate['time']).strftime("%Y-%m-%d %H:%M:%S"),
-                    "open": float(rate['open']),
-                    "high": float(rate['high']),
-                    "low": float(rate['low']),
-                    "close": float(rate['close']),
-                    "volume": int(rate['tick_volume'])
-                })
-
-            result = {
-                "symbol": strategy.symbol,
-                "timeframe": timeframe_str,
-                "count": len(klines),
-                "klines": klines
-            }
-
-            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
-
-        elif name == "get_technical_indicators":
-            timeframe_str = arguments.get("timeframe", "H1")
-            indicators = arguments.get("indicators", ["MA", "RSI", "MACD"])
-
-            timeframe = TIMEFRAME_MAP.get(timeframe_str)
-            if timeframe is None:
-                return [TextContent(type="text", text=json.dumps({
-                    "error": f"不支持的时间周期: {timeframe_str}"
-                }, ensure_ascii=False))]
-
-            rates = mt5.copy_rates_from_pos(strategy.symbol, timeframe, 0, 200)
-            if rates is None or len(rates) == 0:
-                return [TextContent(type="text", text=json.dumps({"error": "无法获取K线数据"}, ensure_ascii=False))]
-
-            closes = [float(r['close']) for r in rates]
-            highs = [float(r['high']) for r in rates]
-            lows = [float(r['low']) for r in rates]
-
-            result = {
-                "symbol": strategy.symbol,
-                "timeframe": timeframe_str,
-                "latest_price": closes[-1],
-                "indicators": {}
-            }
-
-            if "MA" in indicators:
-                ma20 = calculate_ma(closes, 20)
-                result["indicators"]["MA"] = {
-                    "MA20": round(ma20[-1], 5) if ma20[-1] else None,
-                    "trend": "上涨" if closes[-1] > ma20[-1] else "下跌" if ma20[-1] else "未知"
-                }
-
-            if "RSI" in indicators:
-                rsi = calculate_rsi(closes, 14)
-                rsi_value = rsi[-1]
-                result["indicators"]["RSI"] = {
-                    "RSI14": round(rsi_value, 2) if rsi_value else None,
-                    "signal": "超买" if rsi_value and rsi_value > 70 else "超卖" if rsi_value and rsi_value < 30 else "中性"
-                }
-
-            if "MACD" in indicators:
-                macd_data = calculate_macd(closes)
-                result["indicators"]["MACD"] = {
-                    "MACD": round(macd_data["macd"][-1], 5) if macd_data["macd"][-1] else None,
-                    "Signal": round(macd_data["signal"][-1], 5) if macd_data["signal"][-1] else None,
-                    "Histogram": round(macd_data["histogram"][-1], 5) if macd_data["histogram"][-1] else None
-                }
-
-            if "BOLL" in indicators:
-                boll = calculate_bollinger(closes, 20, 2.0)
-                result["indicators"]["BOLL"] = {
-                    "upper": round(boll["upper"][-1], 5) if boll["upper"][-1] else None,
-                    "middle": round(boll["middle"][-1], 5) if boll["middle"][-1] else None,
-                    "lower": round(boll["lower"][-1], 5) if boll["lower"][-1] else None
-                }
-
-            if "ATR" in indicators:
-                atr = calculate_atr(highs, lows, closes, 14)
-                atr_value = atr[-1]
-                atr_pct = (atr_value / closes[-1] * 100) if atr_value else None
-                result["indicators"]["ATR"] = {
-                    "ATR14": round(atr_value, 5) if atr_value else None,
-                    "ATR_pct": round(atr_pct, 4) if atr_pct else None
-                }
-
-            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
-
-        elif name == "get_martin_status":
-            martin_status = strategy.get_martin_status()
-            return [TextContent(type="text", text=json.dumps(martin_status, ensure_ascii=False, indent=2))]
-
-        elif name == "enable_martin":
-            strategy.martin_enabled = True
-            strategy.martin_pause_reason = None
-            logging.info("马丁已启用 (via MCP)")
-            return [TextContent(type="text", text=json.dumps({
-                "success": True, "message": "马丁加仓功能已启用", "martin_enabled": True
-            }, ensure_ascii=False, indent=2))]
-
-        elif name == "disable_martin":
-            reason = arguments.get("reason", "手动禁用")
-            strategy.martin_enabled = False
-            strategy.martin_pause_reason = reason
-            logging.warning(f"马丁已禁用 (via MCP): {reason}")
-            return [TextContent(type="text", text=json.dumps({
-                "success": True, "message": f"马丁加仓功能已禁用: {reason}", "martin_enabled": False
-            }, ensure_ascii=False, indent=2))]
-
-        elif name == "notify_owner":
-            message = arguments.get("message")
-            if not message:
-                return [TextContent(type="text", text=json.dumps({
-                    "success": False, "message": "消息内容不能为空"
-                }, ensure_ascii=False))]
-
-            try:
-                url = "http://127.0.0.1:5000/transparent-pass"
-                payload = {"user": "User", "text": message, "audio": None}
-                headers = {'Content-Type': 'application/json'}
-
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None,
-                    functools.partial(requests.post, url, json=payload, headers=headers, timeout=5)
-                )
-
-                if response.status_code == 200:
-                    return [TextContent(type="text", text=json.dumps({
-                        "success": True, "message": f"已通知主人: {message}"
-                    }, ensure_ascii=False))]
-                else:
-                    return [TextContent(type="text", text=json.dumps({
-                        "success": False, "message": f"通知失败，状态码: {response.status_code}"
-                    }, ensure_ascii=False))]
-            except Exception as e:
-                return [TextContent(type="text", text=json.dumps({
-                    "success": False, "message": f"通知发送失败: {str(e)}"
-                }, ensure_ascii=False))]
-
-        else:
-            return [TextContent(type="text", text=json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False))]
-
-    except Exception as e:
-        logging.error(f"工具调用错误 {name}: {str(e)}")
-        return [TextContent(type="text", text=json.dumps({"error": str(e)}, ensure_ascii=False))]
+    except Exception as exc:
+        logging.error(f"Tool error {name}: {exc}")
+        return [TextContent(type="text", text=json.dumps({"error": str(exc)}, ensure_ascii=False))]
 
 
-# ============== MCP 资源定义 ==============
+# ============== MCP resources ==============
 
 @server.list_resources()
 async def list_resources() -> list[Resource]:
-    """列出可用的资源"""
+    """List available resources."""
     return [
         Resource(
             uri="trading://status",
-            name="实时交易状态",
-            description="获取当前交易策略的实时状态信息",
+            name="Trading Status",
+            description="Current account, positions, and market snapshot.",
             mimeType="application/json"
         ),
         Resource(
             uri="trading://config",
-            name="策略配置",
-            description="获取当前策略的配置参数",
+            name="Monitor Config",
+            description="Current monitor configuration and parameters.",
             mimeType="application/json"
         ),
         Resource(
             uri="trading://strategy-doc",
-            name="策略逻辑文档",
-            description="获取EasyDeal交易策略的完整逻辑说明",
+            name="Strategy Description",
+            description="LLM-inferred strategy description from observations.",
             mimeType="text/markdown"
-        ),
-        Resource(
-            uri="trading://source-code",
-            name="完整源代码",
-            description="获取EasyDeal MCP Server的完整源代码（包含策略、监控、API）",
-            mimeType="text/x-python"
-        ),
+        )
     ]
 
 
 @server.read_resource()
 async def read_resource(uri: str) -> str:
-    """读取资源"""
+    """Read resource content."""
     if uri == "trading://status":
         strategy = get_strategy()
         return json.dumps(strategy.get_status(), ensure_ascii=False, indent=2)
-
-    elif uri == "trading://config":
+    if uri == "trading://config":
         strategy = get_strategy()
         return json.dumps(strategy.get_config_info(), ensure_ascii=False, indent=2)
-
-    elif uri == "trading://strategy-doc":
-        return get_strategy_documentation()
-
-    elif uri == "trading://source-code":
-        return get_file_content(SOURCE_FILE_PATH)
-
-    else:
-        return json.dumps({"error": f"未知资源: {uri}"}, ensure_ascii=False)
+    if uri == "trading://strategy-doc":
+        strategy = get_strategy()
+        ok, doc = _get_or_generate_strategy_doc(strategy)
+        return doc
+    return json.dumps({"error": f"Unknown resource: {uri}"}, ensure_ascii=False)
 
 
-# ============== MCP 提示模板定义 ==============
+# ============== MCP prompts ==============
 
 @server.list_prompts()
 async def list_prompts() -> list[Prompt]:
-    """列出可用的提示模板"""
+    """List available prompts."""
     return [
         Prompt(
             name="analyze_trading_situation",
-            description="分析当前交易状况并给出建议",
+            description="Analyze current trading situation and suggest next steps.",
             arguments=[]
         ),
         Prompt(
             name="risk_assessment",
-            description="进行风险评估并提供风控建议",
+            description="Assess risk based on exposure and P/L.",
             arguments=[]
-        ),
+        )
     ]
 
 
 @server.get_prompt()
 async def get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptResult:
-    """获取提示模板"""
+    """Get a prompt template."""
     strategy = get_strategy()
+    status = strategy.get_status()
+    config = strategy.get_config_info()
+
+    summary = status.get("orders", {}).get("summary", {})
+    total_profit = status.get("orders", {}).get("total_profit", 0)
+    market = status.get("market_data", {})
+    state = status.get("strategy_state", {})
 
     if name == "analyze_trading_situation":
-        status = strategy.get_status()
-        config = strategy.get_config_info()
-
+        text = f"""Analyze the current trading situation and provide suggestions.
+Market: {market.get('symbol')} bid={market.get('bid')} ask={market.get('ask')}
+Positions: total={summary.get('positions_total')} buy={summary.get('buy_count')} sell={summary.get('sell_count')} net_volume={summary.get('net_volume')}
+P/L: {total_profit}
+State: running={state.get('running')} open_position={state.get('is_open_position')}
+Config: max_loss={config.get('parameters', {}).get('max_loss')} magic_numbers={config.get('parameters', {}).get('magic_numbers')}
+"""
         return GetPromptResult(
-            description="分析当前交易状况",
-            messages=[
-                PromptMessage(
-                    role="user",
-                    content=TextContent(
-                        type="text",
-                        text=f"""请分析以下交易状况并给出建议：
-
-## 当前市场数据
-- 交易品种: {status['market_data']['symbol']}
-- 买价: {status['market_data']['bid']}
-- 卖价: {status['market_data']['ask']}
-
-## 策略状态
-- 运行状态: {'运行中' if status['strategy_state']['running'] else '已停止'}
-- 暂停状态: {'已暂停' if status['strategy_state']['paused'] else '未暂停'}
-- 马丁层级: {status['strategy_state']['seek']}
-
-## 持仓情况
-- 总浮动盈亏: {status['orders']['total_profit']}
-
-请分析：
-1. 当前市场走势对策略的影响
-2. 持仓风险评估
-3. 下一步操作建议"""
-                    )
-                )
-            ]
+            description="Analyze current trading situation",
+            messages=[PromptMessage(role="user", content=TextContent(type="text", text=text))]
         )
 
-    else:
+    if name == "risk_assessment":
+        text = f"""Assess risk given the current exposure and P/L.
+Balance={status.get('account', {}).get('balance')} Equity={status.get('account', {}).get('equity')} MarginLevel={status.get('account', {}).get('margin_level')}
+TotalProfit={total_profit} MaxLoss={config.get('parameters', {}).get('max_loss')}
+PositionsTotal={summary.get('positions_total')}
+"""
         return GetPromptResult(
-            description="未知提示",
-            messages=[
-                PromptMessage(
-                    role="user",
-                    content=TextContent(type="text", text=f"未找到提示模板: {name}")
-                )
-            ]
+            description="Assess current risk",
+            messages=[PromptMessage(role="user", content=TextContent(type="text", text=text))]
         )
 
+    return GetPromptResult(
+        description="Unknown prompt",
+        messages=[PromptMessage(role="user", content=TextContent(type="text", text=f"Unknown prompt: {name}"))]
+    )
 
-# ============== 启动服务函数 ==============
+
+# ============== Service startup ==============
 
 def start_all_services():
-    """启动所有服务（策略、监控、Flask）"""
+    """Start MT5 monitor services."""
     global strategy_instance, monitor_instance
 
-    logging.info("MCP连接已建立，开始启动所有服务...")
+    logging.info("MCP connected; starting services...")
 
-    # 初始化MT5连接
-    if not mt5.initialize():
-        logging.error("MT5初始化失败")
-        return False
-
-    logging.info("MT5连接成功")
-
-    # 创建策略实例
-    strategy_instance = EasyDealStrategy()
+    strategy_instance = TradingContext()
     if not strategy_instance.running:
-        logging.error("策略初始化失败")
+        logging.error("Trading context initialization failed")
         mt5.shutdown()
         return False
 
-    logging.info("策略实例创建成功")
+    logging.info("Trading context created")
 
-    # 创建监控器
     monitor_instance = TradingMonitor(strategy_instance)
     monitor_instance.add_callback(FileCallback())
     monitor_instance.add_callback(AgentCallback(
-        url="http://127.0.0.1:5000/v1/chat/completions",
-        api_key="YOUR_API_KEY",
-        model="fay-streming",
-        role="安监",
+        url=os.getenv("FAY_API_URL", "http://127.0.0.1:5000/v1/chat/completions"),
+        api_key=os.getenv("FAY_API_KEY", "YOUR_API_KEY"),
+        model=os.getenv("FAY_MODEL", "fay-streming"),
+        role=os.getenv("FAY_ROLE", "monitor"),
         cooldown=1800
     ))
-    logging.info("监控器创建成功")
+    logging.info("Monitor created")
 
-    # 启动Flask服务器线程
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    logging.info("Flask API服务器已启动 (端口: 8888)")
+    logging.info("Flask API started (port 8888)")
 
-    # 启动策略运行线程
-    strategy_thread = threading.Thread(target=strategy_instance.run, daemon=True)
-    strategy_thread.start()
-    logging.info("策略运行线程已启动")
-
-    # 启动监控线程
     monitor_thread = threading.Thread(target=monitor_instance.run, daemon=True)
     monitor_thread.start()
-    logging.info("监控服务线程已启动")
+    logging.info("Monitor thread started")
+    logging.info("Strategy execution runs inside the EA; no strategy thread started.")
 
-    logging.info("所有服务已启动完成")
+    persist_thread = threading.Thread(target=_strategy_doc_persist_loop, daemon=True)
+    persist_thread.start()
+    logging.info("Strategy doc refresh scheduler started (00:15 daily)")
+
     return True
 
 
-# 标记服务是否已启动
 services_started = False
-
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
-    """列出所有可用的交易工具（首次调用时启动服务）"""
+    """List tools; start services on first call."""
     global services_started
-
-    # MCP连接后首次调用工具列表时启动服务
     if not services_started:
         services_started = True
-        logging.info("检测到MCP连接，正在启动服务...")
         if start_all_services():
-            logging.info("服务启动成功")
+            logging.info("Services started")
         else:
-            logging.error("服务启动失败")
-
+            logging.error("Service startup failed")
     return get_all_tools()
 
 
-# ============== 主函数 ==============
+# ============== Main ==============
 
 async def run_mcp_server():
-    """运行MCP服务器"""
+    """Run MCP server."""
     async with stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,
@@ -2499,22 +2252,20 @@ async def run_mcp_server():
 
 
 async def main():
-    """主入口函数"""
+    """Entry point."""
     logging.info("=" * 50)
-    logging.info("EasyDeal MCP Server 已启动")
-    logging.info("等待MCP连接后自动启动交易服务...")
+    logging.info("EasyDeal MCP Server started")
+    logging.info("Waiting for MCP connection...")
     logging.info("=" * 50)
-
     try:
-        # 运行MCP服务器（阻塞等待连接）
         await run_mcp_server()
     except KeyboardInterrupt:
-        logging.info("收到中断信号，正在关闭...")
+        logging.info("Interrupted; shutting down")
     finally:
         if strategy_instance:
             strategy_instance.running = False
         mt5.shutdown()
-        logging.info("MCP Server已关闭")
+        logging.info("MCP Server stopped")
 
 
 if __name__ == "__main__":
