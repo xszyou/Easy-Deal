@@ -84,7 +84,30 @@ easy-deal/
    pip install -r requirements.txt
    ```
 
-3. **连接 AI Agent**：
+3. **环境变量 (可选)**：
+   
+   - 环境变量会覆盖 `monitor_profile.json` 和 `.set` 中的同名配置。
+   - 列表类型支持 `,` 或 `;` 分隔（自动去空格）。
+   - 可在系统环境变量中设置，或写入 Fay 配置里的 `env` 字段。
+   
+   | 变量 | 说明 | 默认值/示例 |
+   | --- | --- | --- |
+   | `EA_PROFILE_PATH` | 监控配置 JSON 路径 | `monitor_profile.json` |
+   | `EA_SET_PATH` | EA `.set` 参数路径（会读取 `MAGIC_NUMBER` 作为监控魔术号） | `../config.set` |
+   | `EA_SYMBOLS` | 监控品种列表 | `XAUUSDm,EURUSDm` |
+   | `EA_SYMBOL` | 单品种（未设置 `EA_SYMBOLS` 时生效） | `XAUUSDm` |
+   | `EA_MAGIC_NUMBERS` | 监控魔术号列表 | `999,1001` |
+   | `EA_MAGIC_NUMBER` | 单魔术号（未设置 `EA_MAGIC_NUMBERS` 时生效） | `999` |
+   | `EA_COMMENT_CONTAINS` | 仅跟踪备注包含关键词 | `hedge,news` |
+   | `EA_COMMENT_EXCLUDES` | 排除备注包含关键词 | `test,manual` |
+   | `EA_STRATEGY_DOC_PATH` | 策略说明文档输出路径 | `logs/<日期>/strategy_doc_latest.md` |
+   | `EA_CONVERSATION_PATH` | 对话上下文日志路径 | 默认从 `logs/easydeal.log` 提取 |
+   | `FAY_MSG_API_URL` | Fay 历史消息接口 | `http://127.0.0.1:5000/api/get-msg` |
+   | `FAY_API_URL` | Fay 对话模型接口 | `http://127.0.0.1:5000/v1/chat/completions` |
+   | `FAY_MSG_LIMIT` | 历史消息读取条数 | `200` |
+   | `FAY_ROLE` | Fay 角色 | `monitor` |
+
+4. **连接 AI Agent**：
    
    - **Claude Desktop**: 修改配置文件，添加 MCP Server 指向。
    
@@ -105,7 +128,10 @@ easy-deal/
                     "easydeal_mcp_server.py"
                 ],
                 "cwd": "D:/Projects/easy_deal_agent/easy-deal", 
-                "env": {}
+                "env": {
+                    "EA_SYMBOLS": "XAUUSDm,EURUSDm",
+                    "EA_MAGIC_NUMBERS": "999,1001
+                }
             }
         ]
         ```
