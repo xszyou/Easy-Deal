@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-EasyDeal 是一套结合了 MetaTrader 5 (MT5) 专家顾问 (EA) 与 Python MCP Server 的现代自动化交易解决方案。
+就算有一套完全自动赚钱的工具，你也会经常盯着它。你跟专业交易员对比，差别在于是否看得懂。而EasyDeal 就是解决这个问题的一套框架，在MT5交易环境可以协同各种策略工作，监控策略的执行、为你解答各种问题、指导你做出突发处理。
 
 - **核心交易端 (EA)**: 由 `GMarket_0.21.mq5` (也可以替换成自己的，或者**进群**获取更多)负责，直接在 MT5 终端运行。它执行核心的交易逻辑（双向开仓、马丁格尔策略、风险控制）、提供图形化操作界面 (UI)，并内置了财经日历新闻过滤功能。
 - **智能监控端 (MCP Server)**: 由 `easydeal_mcp_server.py` 负责。它作为 AI Agent (如 Claude Desktop, Fay) 的连接器，通过 MCP 协议提供实时的策略状态监控、异常告警、日志分析及一致性校验功能。
@@ -90,22 +90,22 @@ easy-deal/
    - 列表类型支持 `,` 或 `;` 分隔（自动去空格）。
    - 可在系统环境变量中设置，或写入 Fay 配置里的 `env` 字段。
    
-   | 变量 | 说明 | 默认值/示例 |
-   | --- | --- | --- |
-   | `EA_PROFILE_PATH` | 监控配置 JSON 路径 | `monitor_profile.json` |
-   | `EA_SET_PATH` | EA `.set` 参数路径（会读取 `MAGIC_NUMBER` 作为监控魔术号） | `../config.set` |
-   | `EA_SYMBOLS` | 监控品种列表 | `XAUUSDm,EURUSDm` |
-   | `EA_SYMBOL` | 单品种（未设置 `EA_SYMBOLS` 时生效） | `XAUUSDm` |
-   | `EA_MAGIC_NUMBERS` | 监控魔术号列表 | `999,1001` |
-   | `EA_MAGIC_NUMBER` | 单魔术号（未设置 `EA_MAGIC_NUMBERS` 时生效） | `999` |
-   | `EA_COMMENT_CONTAINS` | 仅跟踪备注包含关键词 | `hedge,news` |
-   | `EA_COMMENT_EXCLUDES` | 排除备注包含关键词 | `test,manual` |
-   | `EA_STRATEGY_DOC_PATH` | 策略说明文档输出路径 | `logs/<日期>/strategy_doc_latest.md` |
-   | `EA_CONVERSATION_PATH` | 对话上下文日志路径 | 默认从 `logs/easydeal.log` 提取 |
-   | `FAY_MSG_API_URL` | Fay 历史消息接口 | `http://127.0.0.1:5000/api/get-msg` |
-   | `FAY_API_URL` | Fay 对话模型接口 | `http://127.0.0.1:5000/v1/chat/completions` |
-   | `FAY_MSG_LIMIT` | 历史消息读取条数 | `200` |
-   | `FAY_ROLE` | Fay 角色 | `monitor` |
+   | 变量                     | 说明                                         | 默认值/示例                                      |
+   | ---------------------- | ------------------------------------------ | ------------------------------------------- |
+   | `EA_PROFILE_PATH`      | 监控配置 JSON 路径                               | `monitor_profile.json`                      |
+   | `EA_SET_PATH`          | EA `.set` 参数路径（会读取 `MAGIC_NUMBER` 作为监控魔术号） | `../config.set`                             |
+   | `EA_SYMBOLS`           | 监控品种列表                                     | `XAUUSDm,EURUSDm`                           |
+   | `EA_SYMBOL`            | 单品种（未设置 `EA_SYMBOLS` 时生效）                  | `XAUUSDm`                                   |
+   | `EA_MAGIC_NUMBERS`     | 监控魔术号列表                                    | `999,1001`                                  |
+   | `EA_MAGIC_NUMBER`      | 单魔术号（未设置 `EA_MAGIC_NUMBERS` 时生效）           | `999`                                       |
+   | `EA_COMMENT_CONTAINS`  | 仅跟踪备注包含关键词                                 | `hedge,news`                                |
+   | `EA_COMMENT_EXCLUDES`  | 排除备注包含关键词                                  | `test,manual`                               |
+   | `EA_STRATEGY_DOC_PATH` | 策略说明文档输出路径                                 | `logs/<日期>/strategy_doc_latest.md`          |
+   | `EA_CONVERSATION_PATH` | 对话上下文日志路径                                  | 默认从 `logs/easydeal.log` 提取                  |
+   | `FAY_MSG_API_URL`      | Fay 历史消息接口                                 | `http://127.0.0.1:5000/api/get-msg`         |
+   | `FAY_API_URL`          | Fay 对话模型接口                                 | `http://127.0.0.1:5000/v1/chat/completions` |
+   | `FAY_MSG_LIMIT`        | 历史消息读取条数                                   | `200`                                       |
+   | `FAY_ROLE`             | Fay 角色                                     | `monitor`                                   |
 
 4. **连接 AI Agent**：
    
