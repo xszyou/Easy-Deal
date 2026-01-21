@@ -63,6 +63,10 @@ long martinOrders[20];//马丁单
 int seek = 0;//马丁单的水位
 bool running = true;
 string martinPauseReason = "";
+datetime lastTradeActionTime = 0;
+datetime lastAutoReloadTime = 0;
+const int AUTO_RELOAD_COOLDOWN = 2;
+const int AUTO_RELOAD_MIN_INTERVAL = 2;
 
 int atrHandle = INVALID_HANDLE;
 int bandsHandle = INVALID_HANDLE;
@@ -76,6 +80,11 @@ double GetBid()
 double GetAsk()
 {
    return SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+}
+
+void MarkTradeAction()
+{
+   lastTradeActionTime = TimeCurrent();
 }
 
 double GetAtrValue()
@@ -224,6 +233,7 @@ long SendMarketOrder(ENUM_ORDER_TYPE orderType, double volume, string comment)
    request.comment = comment;
    request.type_filling = ORDER_FILLING_IOC;
 
+   MarkTradeAction();
    if (!OrderSend(request, result) || result.retcode != TRADE_RETCODE_DONE){
       return -1;
    }
@@ -266,6 +276,7 @@ bool ClosePositionByTicket(long ticket)
    request.comment = "Close position";
    request.type_filling = ORDER_FILLING_IOC;
 
+   MarkTradeAction();
    if (!OrderSend(request, result) || result.retcode != TRADE_RETCODE_DONE){
       return false;
    }
@@ -321,6 +332,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   AutoReloadIfNeeded();
    UpdateGUI(); // Update UI on every tick
 
    // Safety Check: Always check max loss first
@@ -489,6 +501,47 @@ void UpdateEAStatus(){
         ObjectDelete(0, "MartinLine");
         ObjectCreate(0, "MartinLine", OBJ_HLINE, 0, 0, CalculateMartinOrdersTotalCost());
     }
+}
+bool ShouldAutoReload()
+{
+   datetime now = TimeCurrent();
+   if (now - lastTradeActionTime <= AUTO_RELOAD_COOLDOWN){
+      return false;
+   }
+   if (now - lastAutoReloadTime <= AUTO_RELOAD_MIN_INTERVAL){
+      return false;
+   }
+
+   int trackedCount = calcTotalOrders();
+   int expectedCount = isOpenPosition ? (2 + (seek > 0 ? seek : 0)) : 0;
+   if (trackedCount != expectedCount){
+      return true;
+   }
+
+   if (isOpenPosition){
+      if (lastBuyOrderTick > 0 && !SelectPositionByTicket(lastBuyOrderTick)){
+         return true;
+      }
+      if (lastSellOrderTick > 0 && !SelectPositionByTicket(lastSellOrderTick)){
+         return true;
+      }
+      for (int i = 0; i < seek; i++){
+         if (martinOrders[i] > 0 && !SelectPositionByTicket(martinOrders[i])){
+            return true;
+         }
+      }
+   }
+
+   return false;
+}
+void AutoReloadIfNeeded()
+{
+   if (!ShouldAutoReload()){
+      return;
+   }
+   lastAutoReloadTime = TimeCurrent();
+   printfPro("自动重载：检测到手动订单变更", true);
+   UpdateEAStatus();
 }
 void ResetAllStatus(){
     isOpenPosition = false;
