@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "easydeal-trading": {
-      "command": "python",
-      "args": ["D:\\Projects\\easy_deal_agent\\easy-deal\\easydeal_mcp_server.py"],
-      "env": {}
-    }
-  }
-}

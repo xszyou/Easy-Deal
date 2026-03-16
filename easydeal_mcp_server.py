@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyDeal MCP Server - 交易监控MCP服务器（统一入口）
 整合了监控服务、MCP协议接口及告警通知
 """
@@ -8,13 +8,14 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 
 import time
 import threading
 import requests
 import functools
 import statistics
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Any, Callable
 from functools import wraps
 
@@ -1428,16 +1429,18 @@ class FileCallback:
 class AgentCallback:
     """Agent 终端回调"""
 
-    def __init__(self, url: str = "http://127.0.0.1:5000/v1/chat/completions",
+    def __init__(self, url: str = "http://127.0.0.1:5000/transparent-pass",
                  api_key: str = "YOUR_API_KEY",
                  model: str = "fay-streming",
                  role: str = "安监",
-                 cooldown: int = 1800):
+                 cooldown: int = 1800,
+                 user: str = "User"):
         self.url = url
         self.api_key = api_key
         self.model = model
         self.role = role
         self.cooldown = cooldown
+        self.user = user
         self.last_alert_time = {}
 
     def __call__(self, event: dict):
@@ -1460,21 +1463,12 @@ class AgentCallback:
 消息: {event['message']}
 数据: {json.dumps(event.get('data', {}), ensure_ascii=False)}"""
 
-            headers = {
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {self.api_key}',
+            payload = {
+                "user": self.user,
+                "text": prompt,
             }
 
-            no_reply = True
-            data = {
-                'model': self.model,
-                'messages': [{'role': self.role, 'content': prompt}],
-                'stream': True,
-                'no_reply': no_reply,
-                'info': True
-            }
-
-            response = requests.post(self.url, headers=headers, data=json.dumps(data), stream=True, timeout=30)
+            response = requests.post(self.url, json=payload, timeout=10)
 
             if response.status_code != 200:
                 monitor_logger.error(f"Agent回调失败，状态码：{response.status_code}")
@@ -1533,9 +1527,15 @@ def _get_strategy_doc_path(date: datetime | None = None) -> str:
     path = os.getenv("EA_STRATEGY_DOC_PATH")
     if path:
         return path
-    current = date or datetime.now()
-    day_dir = os.path.join(log_directory, current.strftime("%Y-%m-%d"))
-    return os.path.join(day_dir, "strategy_doc_latest.md")
+    # Single, read-only strategy doc by default (no date-scoped rotation).
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, "strategy_doc_latest.md")
+
+
+def _get_latest_strategy_doc_path(max_lookback_days: int = 30) -> str:
+    """Compatibility helper: strategy doc is now a single path."""
+    _ = max_lookback_days
+    return _get_strategy_doc_path()
 
 
 def _read_strategy_doc(path: str) -> str:
@@ -1820,25 +1820,266 @@ def _seconds_until_next_doc_update(now: datetime | None = None) -> float:
     return max(seconds, 1.0)
 
 
-def _strategy_doc_persist_loop() -> None:
+def _previous_day_window(now: datetime | None = None) -> tuple[date, str, str, str]:
+    """Return (review_date, date_prefix, start_time, end_time) for the previous day."""
+    current = now or datetime.now()
+    review_date = (current - timedelta(days=1)).date()
+    date_prefix = review_date.strftime("%Y-%m-%d")
+    start_dt = datetime(review_date.year, review_date.month, review_date.day, 0, 0, 0)
+    end_dt = start_dt + timedelta(days=1) - timedelta(seconds=1)
+    return review_date, date_prefix, start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _build_consistency_review_context(
+    strategy: TradingContext,
+    date_prefix: str,
+    start_time: str,
+    end_time: str,
+    base_doc_path: str,
+) -> dict:
+    order_logs = _read_recent_lines(
+        log_file,
+        limit=400,
+        date_prefix=date_prefix,
+        keywords=["[OPEN]", "[CLOSE]", "[UPDATE]"],
+    )
+    log_lines = _read_recent_lines(
+        log_file,
+        limit=200,
+        date_prefix=date_prefix,
+        keywords=["WARNING", "ERROR", "indicator_report", "risk_loss", "order_change"],
+    )
+    events = _read_monitor_events(date_prefix=date_prefix, limit=100)
+
+    try:
+        msg_limit = int(os.getenv("FAY_MSG_LIMIT", "200"))
+    except (TypeError, ValueError):
+        msg_limit = 200
+    chat_records = _fetch_chat_history(date_prefix=date_prefix, limit=msg_limit)
+
+    profit_history = strategy.get_profit_history(start_time=start_time, end_time=end_time)
+    deals = profit_history.get("deals") if isinstance(profit_history, dict) else None
+    if isinstance(deals, list) and len(deals) > 200:
+        profit_history["deals"] = deals[-200:]
+        profit_history["notes"] = "deals truncated to last 200 items"
+
+    return {
+        "review_date": date_prefix,
+        "window": {"start": start_time, "end": end_time},
+        "base_doc_path": base_doc_path,
+        "status": strategy.get_status(),
+        "config": strategy.get_config_info(),
+        "order_logs": order_logs,
+        "log_lines": log_lines,
+        "events": events,
+        "chat_records": chat_records,
+        "profit_history": profit_history,
+    }
+
+
+def _build_consistency_review_prompt(review_date: date, base_doc: str) -> str:
+    review_day = review_date.strftime("%Y-%m-%d")
+    prompt_sections = [
+        "You are a trading-strategy auditor.",
+        f"Review date: {review_day} (use only this day's observations).",
+        "Task: judge whether the observed trading is consistent with the strategy description.",
+        "Do not rewrite the strategy description and do not auto-update any documentation.",
+        "Return strict JSON only (no extra text):",
+        "{\"consistent\": true|false|null, \"summary\": \"\", \"mismatches\": [], \"evidence\": []}",
+        "consistent=false means clear mismatch; true means broadly consistent; null means insufficient evidence or no trades.",
+        "Strategy description:",
+        base_doc or "(empty)",
+    ]
+    return "\n".join(prompt_sections)
+
+
+def _extract_json_object(text: str) -> dict | None:
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        pass
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _parse_consistency_assessment(text: str) -> dict:
+    payload = _extract_json_object(text)
+    consistent = None
+    summary = (text or "").strip()
+    mismatches: list[str] = []
+    evidence: list[str] = []
+
+    # Chinese keywords written with unicode escapes to avoid encoding issues.
+    zh_consistent = "\u4e00\u81f4"          # 一致
+    zh_inconsistent = "\u4e0d\u4e00\u81f4"  # 不一致
+    zh_not_match = "\u4e0d\u7b26"           # 不符
+    zh_conflict = "\u51b2\u7a81"            # 冲突
+    zh_contradiction = "\u77db\u76fe"       # 矛盾
+    zh_match = "\u7b26\u5408"               # 符合
+    zh_fit = "\u543b\u5408"                 # 吻合
+
+    if payload:
+        raw_consistent = payload.get("consistent")
+        if isinstance(raw_consistent, bool) or raw_consistent is None:
+            consistent = raw_consistent
+        elif isinstance(raw_consistent, str):
+            lowered = raw_consistent.strip().lower()
+            if lowered in ("true", "yes", zh_consistent, "consistent"):
+                consistent = True
+            elif lowered in ("false", "no", zh_inconsistent, "inconsistent"):
+                consistent = False
+            else:
+                consistent = None
+        if payload.get("summary"):
+            summary = str(payload.get("summary")).strip()
+        if isinstance(payload.get("mismatches"), list):
+            mismatches = [str(item) for item in payload["mismatches"] if str(item).strip()]
+        if isinstance(payload.get("evidence"), list):
+            evidence = [str(item) for item in payload["evidence"] if str(item).strip()]
+    else:
+        lowered = summary.lower()
+        inconsistent_hits = [
+            zh_inconsistent,
+            zh_not_match,
+            zh_contradiction,
+            zh_conflict,
+            "inconsistent",
+            "mismatch",
+            "conflict",
+        ]
+        consistent_hits = [
+            zh_consistent,
+            zh_match,
+            zh_fit,
+            "consistent",
+            "match",
+        ]
+        if any(token in lowered for token in inconsistent_hits):
+            consistent = False
+        elif any(token in lowered for token in consistent_hits):
+            consistent = True
+
+    return {
+        "consistent": consistent,
+        "summary": summary,
+        "mismatches": mismatches,
+        "evidence": evidence,
+        "raw": text,
+        "payload": payload,
+    }
+
+
+def _notify_strategy_review(level: str, message: str, data: dict, alert_key: str) -> None:
+    global monitor_instance
+    if monitor_instance:
+        monitor_instance.notify(
+            event_type="strategy_consistency_review",
+            level=level,
+            message=message,
+            data=data,
+            alert_key=alert_key,
+        )
+        return
+    logging.warning("Strategy review notification skipped (monitor not ready): %s", message)
+
+
+def _strategy_consistency_review_loop() -> None:
     while True:
         try:
             wait_seconds = _seconds_until_next_doc_update()
-            logging.info("Strategy doc refresh scheduled in %s seconds", int(wait_seconds))
+            logging.info("Strategy consistency review scheduled in %s seconds", int(wait_seconds))
             time.sleep(wait_seconds)
+
             try:
                 strategy = get_strategy()
             except Exception as exc:
-                logging.warning("Strategy doc refresh skipped: %s", exc)
+                logging.warning("Strategy consistency review skipped: %s", exc)
                 continue
-            ok, doc = generate_strategy_documentation(strategy)
-            if ok:
-                _persist_strategy_doc(doc)
-                logging.info("Strategy doc updated")
+
+            review_date, date_prefix, start_time, end_time = _previous_day_window()
+            base_doc_path = _get_strategy_doc_path()
+            base_doc = _read_strategy_doc(base_doc_path)
+
+            if not base_doc:
+                _notify_strategy_review(
+                    level="warning",
+                    message=(
+                        f"\u672a\u627e\u5230\u7b56\u7565\u8bf4\u660e\u6587\u6863\uff0c"
+                        f"\u65e0\u6cd5\u590d\u76d8 {date_prefix} \u7684\u4e00\u81f4\u6027\u3002"
+                        "\u8bf7\u751f\u6210\u6216\u63d0\u4f9b\u7b56\u7565\u8bf4\u660e\u3002"
+                    ),
+                    data={
+                        "review_date": date_prefix,
+                        "doc_path": base_doc_path,
+                        "window": {"start": start_time, "end": end_time},
+                    },
+                    alert_key=f"strategy_consistency_review:missing_doc:{date_prefix}",
+                )
+                continue
+
+            context = _build_consistency_review_context(
+                strategy=strategy,
+                date_prefix=date_prefix,
+                start_time=start_time,
+                end_time=end_time,
+                base_doc_path=base_doc_path,
+            )
+
+            prompt = _build_consistency_review_prompt(review_date, base_doc)
+            observation = json.dumps(context, ensure_ascii=False)
+            ok, result = _query_fay(prompt, observation)
+            if not ok:
+                logging.warning("Strategy consistency review failed for %s: %s", date_prefix, result)
+                _notify_strategy_review(
+                    level="warning",
+                    message=f"{date_prefix} \u4e00\u81f4\u6027\u590d\u76d8\u5931\u8d25\uff1a{result}",
+                    data={"review_date": date_prefix, "doc_path": base_doc_path},
+                    alert_key=f"strategy_consistency_review:error:{date_prefix}",
+                )
+                continue
+
+            assessment = _parse_consistency_assessment(result)
+            consistent = assessment.get("consistent")
+
+            if consistent is False:
+                _notify_strategy_review(
+                    level="warning",
+                    message=(
+                        f"{date_prefix} \u4ea4\u6613\u4e0e\u7b56\u7565\u63cf\u8ff0"
+                        "\u53ef\u80fd\u4e0d\u4e00\u81f4\uff0c\u8bf7\u68c0\u67e5\u7b56\u7565"
+                        "\u6216\u66f4\u6b63\u63cf\u8ff0\u3002"
+                    ),
+                    data={
+                        "review_date": date_prefix,
+                        "doc_path": base_doc_path,
+                        "window": {"start": start_time, "end": end_time},
+                        "assessment": {
+                            "summary": assessment.get("summary"),
+                            "mismatches": assessment.get("mismatches"),
+                            "evidence": assessment.get("evidence"),
+                        },
+                    },
+                    alert_key=f"strategy_consistency_review:mismatch:{date_prefix}",
+                )
+            elif consistent is True:
+                logging.info("Strategy consistency review: consistent for %s", date_prefix)
             else:
-                logging.warning("Strategy doc refresh failed: %s", doc)
+                logging.info(
+                    "Strategy consistency review inconclusive for %s: %s",
+                    date_prefix,
+                    assessment.get("summary"),
+                )
         except Exception as exc:
-            logging.warning("Strategy doc refresh loop error: %s", exc)
+            logging.warning("Strategy consistency review loop error: %s", exc)
             time.sleep(60)
 
 
@@ -1899,14 +2140,12 @@ def generate_strategy_documentation(strategy, arguments: dict = None) -> tuple:
 
 
 def _get_or_generate_strategy_doc(strategy, arguments: dict | None = None) -> tuple:
-    doc = get_strategy_documentation_base()
+    _ = strategy, arguments
+    doc_path = _get_strategy_doc_path()
+    doc = _read_strategy_doc(doc_path)
     if doc:
         return True, doc
-    ok, generated = generate_strategy_documentation(strategy, arguments)
-    if ok:
-        _persist_strategy_doc(generated)
-        return True, generated
-    return False, generated
+    return False, f"strategy documentation not found at: {doc_path}"
 
 
 TIMEFRAME_MAP = {
@@ -2200,11 +2439,12 @@ def start_all_services():
     monitor_instance = TradingMonitor(strategy_instance)
     monitor_instance.add_callback(FileCallback())
     monitor_instance.add_callback(AgentCallback(
-        url=os.getenv("FAY_API_URL", "http://127.0.0.1:5000/v1/chat/completions"),
+        url=os.getenv("FAY_NOTIFY_URL", "http://127.0.0.1:5000/transparent-pass"),
         api_key=os.getenv("FAY_API_KEY", "YOUR_API_KEY"),
-        model=os.getenv("FAY_MODEL", "fay-streming"),
+        model=os.getenv("FAY_MODEL", "fay-streaming"),
         role=os.getenv("FAY_ROLE", "monitor"),
-        cooldown=1800
+        cooldown=1800,
+        user=os.getenv("FAY_NOTIFY_USER", "User")
     ))
     logging.info("Monitor created")
 
@@ -2217,9 +2457,9 @@ def start_all_services():
     logging.info("Monitor thread started")
     logging.info("Strategy execution runs inside the EA; no strategy thread started.")
 
-    persist_thread = threading.Thread(target=_strategy_doc_persist_loop, daemon=True)
+    persist_thread = threading.Thread(target=_strategy_consistency_review_loop, daemon=True)
     persist_thread.start()
-    logging.info("Strategy doc refresh scheduler started (00:15 daily)")
+    logging.info("Strategy consistency review scheduler started (00:15 daily, no auto doc update)")
 
     return True
 
