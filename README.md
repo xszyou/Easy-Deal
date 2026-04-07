@@ -106,6 +106,9 @@ easy-deal/
    | `FAY_API_URL`          | Fay 对话模型接口                                 | `http://127.0.0.1:5000/v1/chat/completions` |
    | `FAY_MSG_LIMIT`        | 历史消息读取条数                                   | `200`                                       |
    | `FAY_ROLE`             | Fay 角色                                     | `monitor`                                   |
+   | `EA_FILE_PATH`         | EA 源码文件完整路径（优先级最高）                        | `D:/MT5Data/MQL5/Experts/GMarket.mq5`       |
+   | `EA_FILENAME`          | EA 源码文件名（用于 MT5 数据目录自动检测）                  | `GMarket.mq5`                               |
+   | `METAEDITOR_PATH`      | MetaEditor64.exe 路径（用于编译 EA）                | `C:\Program Files\MetaTrader 5\MetaEditor64.exe` |
 
 4. **连接 AI Agent**：
    
@@ -165,10 +168,12 @@ easy-deal/
 
 | 工具名                          | 说明                          |
 | ---------------------------- | --------------------------- |
-| `get_trading_logs`           | 获取交易日志，支持按日期和类型（开仓/平仓/警告）筛选 |
+| `get_monitor_logs`           | 获取 MCP 监控服务日志（持仓变动/告警/风控），支持按日期和类型筛选 |
+| `get_mt5_logs`               | 获取 MT5 终端日志（连接/订单执行），支持日期和关键词过滤，尾部截取 |
+| `get_ea_logs`                | 获取 EA 策略 Print() 日志（交易决策/马丁触发），支持日期和关键词过滤，尾部截取 |
 | `get_trading_status`         | 获取账户资金、持仓摘要及 EA 运行状态        |
 | `get_market_info`            | 获取当前品种实时行情（买卖价、点差）          |
-| `get_config`                 | 获取当前监控配置参数                  |
+| `get_config`                 | 获取监控配置及 EA 运行参数（自动从 .set / 图表配置 / 源码获取），含 EA 路径和编译器路径 |
 | `get_strategy_documentation` | 获取策略逻辑说明文档                  |
 | `get_profit_history`         | 获取指定天数内的收益历史统计              |
 | `analyze_risk`               | AI 自动分析当前账户风险等级（基于浮亏比例）     |
@@ -176,6 +181,11 @@ easy-deal/
 | `update_config`              | 动态更新监控配置（如风控阈值、魔术号过滤等）      |
 | `get_klines`                 | 获取 K 线/蜡烛图数据（支持多周期）         |
 | `notify_owner`               | 通过数字人播报紧急消息                 |
+| `read_strategy_source`       | 读取 EA 策略源码（支持指定行范围，带行号）      |
+| `get_strategy_params`        | 解析 EA 所有 input 参数（名称/类型/值/注释）|
+| `update_strategy_param`      | 修改指定 input 参数值（自动备份）         |
+| `patch_strategy_code`        | 搜索替换策略代码（支持预览和确认两步操作）       |
+| `compile_strategy`           | 调用 MetaEditor64 编译 EA 并返回编译结果  |
 
 ## 许可证
 

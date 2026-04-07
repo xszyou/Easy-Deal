@@ -10,6 +10,8 @@ import logging.handlers
 import os
 import re
 
+import shutil
+import subprocess
 import time
 import threading
 import requests
@@ -105,7 +107,7 @@ class TradingContext:
         profile_path = os.getenv("EA_PROFILE_PATH")
         self.profile_path = profile_path if profile_path else "monitor_profile.json"
         self.profile = {}
-        self.symbols = ["XAUUSDm"]
+        self.symbols = ["XAUUSDm", "XAUUSDc", "XAUUSD"]
         self.symbol = self.symbols[0]
         self.magic_numbers = [999]
         self.magic_number = self.magic_numbers[0]
@@ -120,6 +122,25 @@ class TradingContext:
         set_ok, set_msg = self.load_set_file(self.set_path)
         if not set_ok:
             logging.warning(f"Set file load failed: {set_msg}")
+            # Fallback 1: read actual runtime params from MT5 chart profile (.chr)
+            chart_params = _load_params_from_chart_profiles()
+            if chart_params:
+                self.set_parameters = {k: self._coerce_set_value(v) for k, v in chart_params.items()}
+                logging.info(f"Loaded {len(chart_params)} runtime params from chart profile")
+            else:
+                # Fallback 2: parse input defaults from EA source code
+                try:
+                    ea_path = _get_strategy_file_path()
+                    if os.path.isfile(ea_path):
+                        with open(ea_path, "r", encoding="utf-8") as f:
+                            ea_content = f.read()
+                        parsed = _parse_input_params(ea_content)
+                        if parsed:
+                            self.set_parameters = {p["name"]: self._coerce_set_value(p["value"]) for p in parsed}
+                            self.set_path = ea_path
+                            logging.info(f"Loaded {len(parsed)} default params from EA source: {ea_path}")
+                except Exception as exc:
+                    logging.warning(f"EA source param fallback failed: {exc}")
 
         # 设置有效期（可选）
         self.expiry_date = None
@@ -170,6 +191,8 @@ class TradingContext:
             "profile_path": self.profile_path,
             "set_path": self.set_path,
             "set_parameters": self.set_parameters,
+            "ea_file_path": _get_strategy_file_path(),
+            "metaeditor_path": _get_metaeditor_path(),
             "expiry_date": self.expiry_date.strftime("%Y-%m-%d %H:%M:%S") if self.expiry_date else None,
             "days_remaining": (self.expiry_date - datetime.now()).days if self.expiry_date else None,
             "is_expired": datetime.now() > self.expiry_date if self.expiry_date else False
@@ -331,13 +354,8 @@ class TradingContext:
     def apply_env_profile(self) -> tuple[bool, str]:
         profile = {}
 
-        symbols_env = os.getenv("EA_SYMBOLS")
-        if symbols_env is not None:
-            profile["symbols"] = self._split_env_list(symbols_env)
-        else:
-            symbol_env = os.getenv("EA_SYMBOL")
-            if symbol_env is not None:
-                profile["symbol"] = symbol_env
+        symbols_env = os.getenv("EA_SYMBOLS", "XAUUSD,XAUUSDm,XAUUSDc")
+        profile["symbols"] = self._split_env_list(symbols_env)
 
         magics_env = os.getenv("EA_MAGIC_NUMBERS")
         if magics_env is not None:
@@ -2161,9 +2179,215 @@ TIMEFRAME_MAP = {
 }
 
 
-# ============== MCP 工具定义 ==============
+# ============== Strategy script helpers ==============
 
-# ============== MCP tools ==============
+def _get_strategy_file_path() -> str:
+    """Return the absolute path to the GMarket.mq5 strategy file.
+
+    Resolution order:
+    1. EA_FILE_PATH env var (full path to .mq5 file)
+    2. Auto-detect from MT5 terminal_info().data_path + MQL5/Experts/GMarket.mq5
+    3. Fallback to project directory
+    """
+    # 1. Explicit env override
+    env_path = os.getenv("EA_FILE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return env_path
+
+    # 2. Auto-detect from running MT5 terminal
+    ea_filename = os.getenv("EA_FILENAME", "GMarket.mq5")
+    try:
+        info = mt5.terminal_info()
+        if info and info.data_path:
+            ea_path = os.path.join(info.data_path, "MQL5", "Experts", ea_filename)
+            if os.path.isfile(ea_path):
+                return ea_path
+    except Exception:
+        pass
+
+    # 3. Fallback: same directory as this script
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), ea_filename)
+
+
+def _parse_input_params(content: str) -> list[dict]:
+    """Parse all 'input' parameter declarations from MQ5 source code."""
+    params = []
+    pattern = re.compile(
+        r'^input\s+'
+        r'(?P<type>\w+)\s+'
+        r'(?P<name>\w+)\s*=\s*'
+        r'(?P<value>[^;]+?)\s*;\s*'
+        r'(?://\s*(?P<comment>.*))?$',
+        re.MULTILINE
+    )
+    for m in pattern.finditer(content):
+        value_str = m.group("value").strip()
+        params.append({
+            "type": m.group("type"),
+            "name": m.group("name"),
+            "value": value_str,
+            "comment": (m.group("comment") or "").strip(),
+        })
+    return params
+
+
+def _load_params_from_chart_profiles(ea_name: str = None) -> dict | None:
+    """Search MT5 chart profiles (.chr) for the running EA's actual input parameters.
+
+    MT5 saves chart config in {data_path}/MQL5/Profiles/Charts/<profile>/<chartNN>.chr.
+    EA inputs appear between <inputs> and </inputs> tags inside an <expert> block.
+    Returns dict of {param_name: value} or None if not found.
+    """
+    if ea_name is None:
+        ea_name = os.getenv("EA_FILENAME", "GMarket.mq5")
+    # Derive the compiled .ex5 name that appears in .chr files
+    ea_ex5 = os.path.splitext(ea_name)[0] + ".ex5"
+
+    try:
+        info = mt5.terminal_info()
+        if not info or not info.data_path:
+            return None
+    except Exception:
+        return None
+
+    charts_dir = os.path.join(info.data_path, "MQL5", "Profiles", "Charts")
+    if not os.path.isdir(charts_dir):
+        return None
+
+    # Walk all profile subdirs looking for .chr files that reference our EA
+    for root, _dirs, files in os.walk(charts_dir):
+        for fname in files:
+            if not fname.lower().endswith(".chr"):
+                continue
+            chr_path = os.path.join(root, fname)
+            try:
+                with open(chr_path, "r", encoding="utf-16-le", errors="replace") as f:
+                    content = f.read()
+            except Exception:
+                try:
+                    with open(chr_path, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                except Exception:
+                    continue
+
+            # Check if this chart has our EA
+            if ea_ex5.lower() not in content.lower():
+                continue
+
+            # Extract <inputs> ... </inputs> block
+            inputs_match = re.search(
+                r'<inputs>\s*\n(.*?)\n\s*</inputs>',
+                content, re.DOTALL | re.IGNORECASE
+            )
+            if not inputs_match:
+                continue
+
+            params = {}
+            for line in inputs_match.group(1).splitlines():
+                line = line.strip()
+                if not line or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                if key:
+                    params[key] = value
+            if params:
+                logging.info(f"Loaded {len(params)} EA params from chart profile: {chr_path}")
+                return params
+
+    return None
+
+
+def _get_mt5_data_path() -> str | None:
+    """Get MT5 data_path from terminal_info, or None."""
+    try:
+        info = mt5.terminal_info()
+        if info and info.data_path:
+            return info.data_path
+    except Exception:
+        pass
+    return None
+
+
+def _read_mt5_log(log_dir: str, date_str: str, keyword: str = None,
+                   page_size: int = 50, page: int = 1) -> dict:
+    """Read an MT5 log file with reverse pagination.
+
+    page=1 returns the latest page_size lines, page=2 the previous batch, etc.
+    """
+    date_compact = date_str.replace("-", "")
+    log_path = os.path.join(log_dir, f"{date_compact}.log")
+
+    if not os.path.isfile(log_path):
+        available = []
+        if os.path.isdir(log_dir):
+            available = sorted(
+                [f[:-4] for f in os.listdir(log_dir) if f.endswith(".log") and f[:-4].isdigit()],
+                reverse=True
+            )[:10]
+        return {"error": f"Log file not found: {log_path}", "available_dates": available}
+
+    # Read file with encoding detection
+    content = None
+    for enc in ("utf-16-le", "utf-8", "latin-1"):
+        try:
+            with open(log_path, "r", encoding=enc, errors="replace") as f:
+                content = f.read()
+            if enc == "utf-16-le" and "\x00" not in content[:100]:
+                content = None
+                continue
+            break
+        except Exception:
+            continue
+
+    if content is None:
+        return {"error": f"Failed to read log file: {log_path}"}
+
+    lines = [l.strip() for l in content.splitlines() if l.strip()]
+
+    if keyword:
+        keyword_lower = keyword.lower()
+        lines = [l for l in lines if keyword_lower in l.lower()]
+
+    total = len(lines)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+
+    # Reverse pagination: page 1 = tail, page 2 = before that, ...
+    end_idx = total - (page - 1) * page_size
+    start_idx = max(0, end_idx - page_size)
+    page_lines = lines[start_idx:end_idx]
+
+    return {
+        "file": log_path,
+        "date": date_str,
+        "total_lines": total,
+        "page": page,
+        "total_pages": total_pages,
+        "page_size": page_size,
+        "lines": page_lines
+    }
+
+
+def _backup_strategy() -> str:
+    """Create a timestamped .bak copy of the strategy file. Returns backup path."""
+    src = _get_strategy_file_path()
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dst = f"{src}.{ts}.bak"
+    shutil.copy2(src, dst)
+    return dst
+
+
+def _get_metaeditor_path() -> str:
+    """Get MetaEditor64.exe path from env or default."""
+    return os.getenv(
+        "METAEDITOR_PATH",
+        r"C:\Program Files\MetaTrader 5\MetaEditor64.exe"
+    )
+
+
+# ============== MCP 工具定义 ==============
 
 # ============== MCP tools ==============
 
@@ -2171,8 +2395,8 @@ def get_all_tools() -> list[Tool]:
     """Return all available MCP tools."""
     return [
         Tool(
-            name="get_trading_logs",
-            description="Fetch trading logs for a date with an optional type filter.",
+            name="get_monitor_logs",
+            description="获取 MCP 监控服务自身的日志（含持仓变动、告警、风控事件等）。从 logs/easydeal.log 读取。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2197,6 +2421,64 @@ def get_all_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="get_mt5_logs",
+            description="获取 MT5 终端日志（连接状态、订单执行回报等）。从 MT5 数据目录 Logs/ 读取，倒序分页（page=1 最新）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "日期 YYYY-MM-DD，默认今天。",
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                    },
+                    "keyword": {
+                        "type": "string",
+                        "description": "关键词过滤（如品种名、order、error），不填返回全部。"
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": "页码，1=最新一页，2=往前翻，默认 1。",
+                        "default": 1
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "description": "每页行数，默认 50。",
+                        "default": 50
+                    }
+                },
+                "required": []
+            }
+        ),
+        Tool(
+            name="get_ea_logs",
+            description="获取 EA 策略的 Print() 输出日志（交易决策、开平仓、马丁触发等）。从 MT5 数据目录 MQL5/Logs/ 读取，倒序分页（page=1 最新）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "日期 YYYY-MM-DD，默认今天。",
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                    },
+                    "keyword": {
+                        "type": "string",
+                        "description": "关键词过滤（如 martin、ladder、breakeven、error），不填返回全部。"
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": "页码，1=最新一页，2=往前翻，默认 1。",
+                        "default": 1
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "description": "每页行数，默认 50。",
+                        "default": 50
+                    }
+                },
+                "required": []
+            }
+        ),
+        Tool(
             name="get_trading_status",
             description="Get current account, positions, and market snapshot.",
             inputSchema={"type": "object", "properties": {}, "required": []}
@@ -2208,7 +2490,7 @@ def get_all_tools() -> list[Tool]:
         ),
         Tool(
             name="get_config",
-            description="Get monitor configuration and loaded parameters.",
+            description="获取监控配置及 EA 运行参数。参数自动按优先级获取：1) .set 文件 2) MT5 图表配置(.chr)中的实际运行值 3) EA 源码 input 默认值。同时返回 EA 源码路径和 MetaEditor 路径。",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
         Tool(
@@ -2236,6 +2518,54 @@ def get_all_tools() -> list[Tool]:
                 "required": []
             }
         ),
+        # ---------- Strategy script improvement tools ----------
+        Tool(
+            name="read_strategy_source",
+            description="读取 GMarket.mq5 策略源码（带行号）。可指定行范围以减少输出量。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "start_line": {"type": "integer", "description": "起始行号（从1开始），默认1", "default": 1},
+                    "end_line": {"type": "integer", "description": "结束行号（含），默认读到末尾"}
+                },
+                "required": []
+            }
+        ),
+        Tool(
+            name="get_strategy_params",
+            description="解析 GMarket.mq5 中所有 input 参数，返回参数名、类型、当前值和注释。",
+            inputSchema={"type": "object", "properties": {}, "required": []}
+        ),
+        Tool(
+            name="update_strategy_param",
+            description="修改 GMarket.mq5 中指定 input 参数的值。修改前自动备份。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "param_name": {"type": "string", "description": "参数名（如 firstLots, step 等）"},
+                    "new_value": {"type": "string", "description": "新值（字符串形式，如 \"0.02\", \"true\"）"}
+                },
+                "required": ["param_name", "new_value"]
+            }
+        ),
+        Tool(
+            name="patch_strategy_code",
+            description="在 GMarket.mq5 中搜索替换代码。confirm=false 仅预览匹配，confirm=true 执行替换（自动备份）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "search": {"type": "string", "description": "要搜索的代码片段（精确匹配）"},
+                    "replace": {"type": "string", "description": "替换为的代码片段"},
+                    "confirm": {"type": "boolean", "description": "false=仅预览，true=执行替换", "default": False}
+                },
+                "required": ["search", "replace"]
+            }
+        ),
+        Tool(
+            name="compile_strategy",
+            description="使用 MetaEditor64 编译 GMarket.mq5，返回编译结果和错误信息。",
+            inputSchema={"type": "object", "properties": {}, "required": []}
+        ),
     ]
 
 
@@ -2246,7 +2576,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         strategy = get_strategy()
         arguments = arguments or {}
 
-        if name == "get_trading_logs":
+        if name == "get_monitor_logs":
             date_prefix = arguments.get("date") or datetime.now().strftime("%Y-%m-%d")
             log_type = str(arguments.get("type", "ALL")).upper()
             limit = int(arguments.get("limit", 100))
@@ -2270,6 +2600,32 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 keywords=keywords
             )
             result = {"date": date_prefix, "type": log_type, "count": len(lines), "lines": lines}
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+        if name == "get_mt5_logs":
+            date_str = arguments.get("date") or datetime.now().strftime("%Y-%m-%d")
+            keyword = arguments.get("keyword")
+            page = int(arguments.get("page", 1))
+            page_size = int(arguments.get("page_size", 50))
+            data_path = _get_mt5_data_path()
+            if not data_path:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": "MT5 terminal not connected, cannot locate log directory"}, ensure_ascii=False))]
+            mt5_log_dir = os.path.join(data_path, "Logs")
+            result = _read_mt5_log(mt5_log_dir, date_str, keyword=keyword, page_size=page_size, page=page)
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+        if name == "get_ea_logs":
+            date_str = arguments.get("date") or datetime.now().strftime("%Y-%m-%d")
+            keyword = arguments.get("keyword")
+            page = int(arguments.get("page", 1))
+            page_size = int(arguments.get("page_size", 50))
+            data_path = _get_mt5_data_path()
+            if not data_path:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": "MT5 terminal not connected, cannot locate log directory"}, ensure_ascii=False))]
+            ea_log_dir = os.path.join(data_path, "MQL5", "Logs")
+            result = _read_mt5_log(ea_log_dir, date_str, keyword=keyword, page_size=page_size, page=page)
             return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         if name == "get_trading_status":
@@ -2307,6 +2663,150 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 start_time = start_dt.strftime("%Y-%m-%d %H:%M:%S")
                 end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
             result = strategy.get_profit_history(start_time=start_time, end_time=end_time)
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+        # ---------- Strategy script improvement tools ----------
+
+        if name == "read_strategy_source":
+            filepath = _get_strategy_file_path()
+            with open(filepath, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            start = max(1, int(arguments.get("start_line", 1)))
+            end = int(arguments.get("end_line", len(lines)))
+            end = min(end, len(lines))
+            numbered = [f"{i}: {lines[i-1].rstrip()}" for i in range(start, end + 1)]
+            result = {
+                "file": filepath,
+                "total_lines": len(lines),
+                "range": f"{start}-{end}",
+                "content": "\n".join(numbered)
+            }
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+        if name == "get_strategy_params":
+            filepath = _get_strategy_file_path()
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            params = _parse_input_params(content)
+            result = {"file": filepath, "param_count": len(params), "params": params}
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+        if name == "update_strategy_param":
+            param_name = arguments["param_name"]
+            new_value = arguments["new_value"]
+            filepath = _get_strategy_file_path()
+
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            # Match the input line for this param
+            pattern = re.compile(
+                r'^(input\s+\w+\s+' + re.escape(param_name) + r'\s*=\s*)([^;]+)(;.*)$',
+                re.MULTILINE
+            )
+            m = pattern.search(content)
+            if not m:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": f"Parameter '{param_name}' not found in strategy file"}, ensure_ascii=False))]
+
+            old_value = m.group(2).strip()
+            backup_path = _backup_strategy()
+            new_content = pattern.sub(rf'\g<1>{new_value} \3', content)
+
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(new_content)
+
+            result = {
+                "param": param_name,
+                "old_value": old_value,
+                "new_value": new_value,
+                "backup": os.path.basename(backup_path)
+            }
+            logging.info(f"Strategy param updated: {param_name} = {old_value} -> {new_value}")
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+        if name == "patch_strategy_code":
+            search = arguments["search"]
+            replace = arguments["replace"]
+            confirm = bool(arguments.get("confirm", False))
+            filepath = _get_strategy_file_path()
+
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            count = content.count(search)
+            if count == 0:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": "Search string not found in strategy file", "search": search}, ensure_ascii=False))]
+
+            if not confirm:
+                # Preview mode: show context around matches
+                previews = []
+                start_idx = 0
+                for i in range(count):
+                    pos = content.find(search, start_idx)
+                    ctx_start = max(0, content.rfind("\n", 0, max(0, pos - 80)) + 1)
+                    ctx_end = min(len(content), content.find("\n", pos + len(search) + 80))
+                    if ctx_end == -1:
+                        ctx_end = len(content)
+                    previews.append(content[ctx_start:ctx_end])
+                    start_idx = pos + len(search)
+                result = {"mode": "preview", "match_count": count, "previews": previews}
+                return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+            # Execute replacement
+            backup_path = _backup_strategy()
+            new_content = content.replace(search, replace)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(new_content)
+
+            result = {
+                "mode": "applied",
+                "match_count": count,
+                "backup": os.path.basename(backup_path)
+            }
+            logging.info(f"Strategy code patched: {count} replacement(s)")
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+        if name == "compile_strategy":
+            filepath = _get_strategy_file_path()
+            metaeditor = _get_metaeditor_path()
+
+            if not os.path.isfile(metaeditor):
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": f"MetaEditor64 not found at: {metaeditor}. "
+                              "Set METAEDITOR_PATH environment variable to the correct path."},
+                    ensure_ascii=False))]
+
+            log_file_path = filepath + ".compile.log"
+            try:
+                proc = subprocess.run(
+                    [metaeditor, f"/compile:{filepath}", f"/log:{log_file_path}"],
+                    capture_output=True, text=True, timeout=60
+                )
+            except subprocess.TimeoutExpired:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": "Compilation timed out (60s)"}, ensure_ascii=False))]
+
+            # Read compile log
+            compile_log = ""
+            if os.path.isfile(log_file_path):
+                with open(log_file_path, "r", encoding="utf-16-le", errors="replace") as f:
+                    compile_log = f.read()
+
+            # Parse errors/warnings from log
+            errors = [l.strip() for l in compile_log.splitlines() if " error" in l.lower() or " : error" in l.lower()]
+            warnings = [l.strip() for l in compile_log.splitlines() if " warning" in l.lower()]
+            success = len(errors) == 0 and proc.returncode == 0
+
+            result = {
+                "success": success,
+                "return_code": proc.returncode,
+                "errors": errors,
+                "warnings": warnings,
+                "log": compile_log[-3000:] if len(compile_log) > 3000 else compile_log
+            }
+            logging.info(f"Strategy compilation: {'SUCCESS' if success else 'FAILED'}")
             return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}, ensure_ascii=False))]
