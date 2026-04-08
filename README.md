@@ -185,7 +185,8 @@ easy-deal/
 | `get_strategy_params`        | 解析 EA 所有 input 参数（名称/类型/值/注释）|
 | `update_strategy_param`      | 修改指定 input 参数值（自动备份）         |
 | `patch_strategy_code`        | 搜索替换策略代码（支持预览和确认两步操作）       |
-| `compile_strategy`           | 调用 MetaEditor64 编译 EA 并返回编译结果  |
+| `compile_strategy`           | 调用 MetaEditor64 编译 EA 并返回编译结果（自动从 MT5 安装目录检测编译器） |
+| `get_strategy_backups`       | 获取 EA 历史备份版本列表（含变更说明），可查看指定版本源码 |
 
 ## 许可证
 

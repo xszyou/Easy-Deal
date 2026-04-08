@@ -1680,26 +1680,46 @@ def _build_strategy_prompt(strategy, context: dict, base_doc: str) -> str:
     config = context.get("config", {})
 
     prompt_sections = [
-        "你是交易策略分析师，请基于提供的信息推测EA的交易逻辑。",
+        "你是交易策略分析师，请基于 EA 源码和运行数据分析策略逻辑。",
+        "优先依据源码理解策略设计，日志和订单作为运行验证。",
         "注意：参数不等于规则；仅在有直接证据时引用。不要臆造指标或条件。",
         "请输出以下内容：",
-        "1) 摘要",
-        "2) 开仓/加仓/平仓假设",
-        "3) 证据（引用日志/订单变化/参数）",
-        "4) 未确定项或反例",
-        "5) 下一步可能行为",
-        "6) 需要补充的数据",
-        "## 账户与持仓",
-        json.dumps({
-            "balance": account.get("balance"),
-            "equity": account.get("equity"),
-            "margin_level": account.get("margin_level"),
-            "positions": summary
-        }, ensure_ascii=False, indent=2),
-        "## 监控配置",
-        json.dumps(config, ensure_ascii=False, indent=2),
+        "1) 策略核心逻辑摘要（基于源码）",
+        "2) 开仓/加仓/平仓规则",
+        "3) 风控机制",
+        "4) 运行参数与源码默认值的偏差分析",
+        "5) 日志验证（实际行为是否与源码逻辑一致）",
+        "6) 未确定项或需补充的数据",
     ]
 
+    # EA source code (highest priority)
+    ea_params = context.get("ea_params", [])
+    if ea_params:
+        prompt_sections.append("## EA 源码参数定义")
+        prompt_sections.append(json.dumps(ea_params, ensure_ascii=False, indent=2))
+
+    param_diff = context.get("param_diff", [])
+    if param_diff:
+        prompt_sections.append("## 运行时参数偏差（源码默认值 vs 实际运行值）")
+        prompt_sections.append(json.dumps(param_diff, ensure_ascii=False, indent=2))
+
+    ea_source = context.get("ea_source_summary", "")
+    if ea_source:
+        prompt_sections.append("## EA 核心逻辑（源码摘要）")
+        prompt_sections.append(ea_source)
+
+    # Account & config
+    prompt_sections.append("## 账户与持仓")
+    prompt_sections.append(json.dumps({
+        "balance": account.get("balance"),
+        "equity": account.get("equity"),
+        "margin_level": account.get("margin_level"),
+        "positions": summary
+    }, ensure_ascii=False, indent=2))
+    prompt_sections.append("## 监控配置")
+    prompt_sections.append(json.dumps(config, ensure_ascii=False, indent=2))
+
+    # Logs (validation evidence)
     order_logs = context.get("order_logs", [])
     if order_logs:
         prompt_sections.append("## 今日订单变化")
@@ -1726,7 +1746,7 @@ def _build_strategy_prompt(strategy, context: dict, base_doc: str) -> str:
         prompt_sections.append("\n".join(chat_records))
 
     if base_doc:
-        prompt_sections.append("## 历史推测记录")
+        prompt_sections.append("## 历史策略文档")
         prompt_sections.append(base_doc)
 
     return "\n".join(prompt_sections)
@@ -1881,6 +1901,18 @@ def _build_consistency_review_context(
         profit_history["deals"] = deals[-200:]
         profit_history["notes"] = "deals truncated to last 200 items"
 
+    # EA logs (direct trading decisions from Print())
+    ea_logs = []
+    data_path = _get_mt5_data_path()
+    if data_path:
+        ea_log_dir = os.path.join(data_path, "MQL5", "Logs")
+        ea_log_result = _read_mt5_log(ea_log_dir, date_prefix, page_size=200, page=1)
+        if "lines" in ea_log_result:
+            ea_logs = ea_log_result["lines"]
+
+    # Parameter diff (source vs runtime)
+    param_diff = _get_param_diff()
+
     return {
         "review_date": date_prefix,
         "window": {"start": start_time, "end": end_time},
@@ -1889,9 +1921,11 @@ def _build_consistency_review_context(
         "config": strategy.get_config_info(),
         "order_logs": order_logs,
         "log_lines": log_lines,
+        "ea_logs": ea_logs,
         "events": events,
         "chat_records": chat_records,
         "profit_history": profit_history,
+        "param_diff": param_diff,
     }
 
 
@@ -1900,11 +1934,15 @@ def _build_consistency_review_prompt(review_date: date, base_doc: str) -> str:
     prompt_sections = [
         "You are a trading-strategy auditor.",
         f"Review date: {review_day} (use only this day's observations).",
-        "Task: judge whether the observed trading is consistent with the strategy description.",
+        "Tasks:",
+        "1. Judge whether the observed trading behavior is consistent with the strategy description.",
+        "2. Check whether runtime parameters (in param_diff) deviate from the strategy doc.",
+        "3. Cross-reference EA logs (ea_logs) with monitor logs for evidence.",
         "Do not rewrite the strategy description and do not auto-update any documentation.",
         "Return strict JSON only (no extra text):",
-        "{\"consistent\": true|false|null, \"summary\": \"\", \"mismatches\": [], \"evidence\": []}",
+        "{\"consistent\": true|false|null, \"summary\": \"\", \"mismatches\": [], \"param_mismatches\": [], \"evidence\": []}",
         "consistent=false means clear mismatch; true means broadly consistent; null means insufficient evidence or no trades.",
+        "param_mismatches: list of {param, doc_value, actual_value, impact} for parameters that differ from the strategy doc.",
         "Strategy description:",
         base_doc or "(empty)",
     ]
@@ -1934,6 +1972,7 @@ def _parse_consistency_assessment(text: str) -> dict:
     consistent = None
     summary = (text or "").strip()
     mismatches: list[str] = []
+    param_mismatches: list = []
     evidence: list[str] = []
 
     # Chinese keywords written with unicode escapes to avoid encoding issues.
@@ -1963,6 +2002,8 @@ def _parse_consistency_assessment(text: str) -> dict:
             mismatches = [str(item) for item in payload["mismatches"] if str(item).strip()]
         if isinstance(payload.get("evidence"), list):
             evidence = [str(item) for item in payload["evidence"] if str(item).strip()]
+        if isinstance(payload.get("param_mismatches"), list):
+            param_mismatches = payload["param_mismatches"]
     else:
         lowered = summary.lower()
         inconsistent_hits = [
@@ -1990,6 +2031,7 @@ def _parse_consistency_assessment(text: str) -> dict:
         "consistent": consistent,
         "summary": summary,
         "mismatches": mismatches,
+        "param_mismatches": param_mismatches,
         "evidence": evidence,
         "raw": text,
         "payload": payload,
@@ -2083,6 +2125,7 @@ def _strategy_consistency_review_loop() -> None:
                         "assessment": {
                             "summary": assessment.get("summary"),
                             "mismatches": assessment.get("mismatches"),
+                            "param_mismatches": assessment.get("param_mismatches"),
                             "evidence": assessment.get("evidence"),
                         },
                     },
@@ -2136,6 +2179,18 @@ def generate_strategy_documentation(strategy, arguments: dict = None) -> tuple:
         msg_limit = 200
     chat_records = _fetch_chat_history(date_prefix=date_prefix, limit=msg_limit)
 
+    # EA source code analysis
+    ea_source_summary = _read_ea_source_summary(max_lines=200)
+    ea_filepath = _get_strategy_file_path()
+    ea_params = []
+    if os.path.isfile(ea_filepath):
+        try:
+            with open(ea_filepath, "r", encoding="utf-8") as f:
+                ea_params = _parse_input_params(f.read())
+        except Exception:
+            pass
+    param_diff = _get_param_diff()
+
     context = {
         "status": strategy.get_status(),
         "config": strategy.get_config_info(),
@@ -2143,7 +2198,10 @@ def generate_strategy_documentation(strategy, arguments: dict = None) -> tuple:
         "log_lines": log_lines,
         "events": events,
         "conversation": conversation,
-        "chat_records": chat_records
+        "chat_records": chat_records,
+        "ea_params": ea_params,
+        "param_diff": param_diff,
+        "ea_source_summary": ea_source_summary,
     }
 
     base_doc = get_strategy_documentation_base()
@@ -2158,12 +2216,17 @@ def generate_strategy_documentation(strategy, arguments: dict = None) -> tuple:
 
 
 def _get_or_generate_strategy_doc(strategy, arguments: dict | None = None) -> tuple:
-    _ = strategy, arguments
     doc_path = _get_strategy_doc_path()
     doc = _read_strategy_doc(doc_path)
     if doc:
         return True, doc
-    return False, f"strategy documentation not found at: {doc_path}"
+    # Auto-generate when doc doesn't exist
+    logging.info("Strategy doc not found, generating from source + logs...")
+    ok, result = generate_strategy_documentation(strategy, arguments)
+    if ok:
+        _persist_strategy_doc(result)
+        logging.info("Strategy doc generated and saved to %s", doc_path)
+    return ok, result
 
 
 TIMEFRAME_MAP = {
@@ -2181,31 +2244,106 @@ TIMEFRAME_MAP = {
 
 # ============== Strategy script helpers ==============
 
+def _detect_ea_from_charts() -> str | None:
+    """Detect the EA name currently loaded on a chart by scanning .chr files.
+
+    Looks for <expert> blocks in chart profiles and extracts the EA .ex5 name.
+    Returns the .mq5 source filename (e.g. 'GMarket.mq5') or None.
+    """
+    try:
+        info = mt5.terminal_info()
+        if not info or not info.data_path:
+            return None
+    except Exception:
+        return None
+
+    charts_dir = os.path.join(info.data_path, "MQL5", "Profiles", "Charts")
+    if not os.path.isdir(charts_dir):
+        return None
+
+    for root, _dirs, files in os.walk(charts_dir):
+        for fname in files:
+            if not fname.lower().endswith(".chr"):
+                continue
+            chr_path = os.path.join(root, fname)
+            try:
+                with open(chr_path, "r", encoding="utf-16-le", errors="replace") as f:
+                    content = f.read()
+            except Exception:
+                try:
+                    with open(chr_path, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                except Exception:
+                    continue
+
+            # Find expert name=XXX.ex5 in <expert> block
+            expert_match = re.search(
+                r'<expert>\s*\n(.*?)\n\s*</expert>',
+                content, re.DOTALL | re.IGNORECASE
+            )
+            if not expert_match:
+                continue
+            name_match = re.search(r'^name=(.+\.ex5)\s*$', expert_match.group(1), re.MULTILINE | re.IGNORECASE)
+            if name_match:
+                ex5_name = name_match.group(1).strip()
+                # Convert .ex5 -> .mq5
+                mq5_name = os.path.splitext(ex5_name)[0] + ".mq5"
+                logging.info(f"Auto-detected EA from chart profile: {mq5_name}")
+                return mq5_name
+
+    return None
+
+
+# Cache to avoid scanning .chr files on every call
+_cached_ea_filename: str | None = None
+
+
 def _get_strategy_file_path() -> str:
-    """Return the absolute path to the GMarket.mq5 strategy file.
+    """Return the absolute path to the EA .mq5 strategy file.
 
     Resolution order:
     1. EA_FILE_PATH env var (full path to .mq5 file)
-    2. Auto-detect from MT5 terminal_info().data_path + MQL5/Experts/GMarket.mq5
-    3. Fallback to project directory
+    2. Auto-detect from MT5 chart profile (.chr) to find which EA is loaded,
+       then locate its .mq5 source in MQL5/Experts/
+    3. EA_FILENAME env var (default GMarket.mq5) in MQL5/Experts/
+    4. Fallback to project directory
     """
+    global _cached_ea_filename
+
     # 1. Explicit env override
     env_path = os.getenv("EA_FILE_PATH")
     if env_path and os.path.isfile(env_path):
         return env_path
 
-    # 2. Auto-detect from running MT5 terminal
-    ea_filename = os.getenv("EA_FILENAME", "GMarket.mq5")
     try:
         info = mt5.terminal_info()
-        if info and info.data_path:
-            ea_path = os.path.join(info.data_path, "MQL5", "Experts", ea_filename)
-            if os.path.isfile(ea_path):
-                return ea_path
+        data_path = info.data_path if info else None
     except Exception:
-        pass
+        data_path = None
 
-    # 3. Fallback: same directory as this script
+    # 2. Auto-detect EA name from chart profiles (cached)
+    if _cached_ea_filename is None:
+        detected = _detect_ea_from_charts()
+        if detected:
+            _cached_ea_filename = detected
+
+    # Determine filename to search for
+    ea_filename = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+
+    # 3. Look in MT5 data directory
+    if data_path:
+        # Try direct path under Experts/
+        ea_path = os.path.join(data_path, "MQL5", "Experts", ea_filename)
+        if os.path.isfile(ea_path):
+            return ea_path
+        # Try recursive search under Experts/ (EA may be in a subfolder)
+        experts_dir = os.path.join(data_path, "MQL5", "Experts")
+        if os.path.isdir(experts_dir):
+            for dirpath, _dirnames, filenames in os.walk(experts_dir):
+                if ea_filename in filenames:
+                    return os.path.join(dirpath, ea_filename)
+
+    # 4. Fallback: same directory as this script
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), ea_filename)
 
 
@@ -2239,7 +2377,7 @@ def _load_params_from_chart_profiles(ea_name: str = None) -> dict | None:
     Returns dict of {param_name: value} or None if not found.
     """
     if ea_name is None:
-        ea_name = os.getenv("EA_FILENAME", "GMarket.mq5")
+        ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
     # Derive the compiled .ex5 name that appears in .chr files
     ea_ex5 = os.path.splitext(ea_name)[0] + ".ex5"
 
@@ -2370,21 +2508,154 @@ def _read_mt5_log(log_dir: str, date_str: str, keyword: str = None,
     }
 
 
-def _backup_strategy() -> str:
-    """Create a timestamped .bak copy of the strategy file. Returns backup path."""
+def _read_ea_source_summary(max_lines: int = 200) -> str:
+    """Read EA source summary: input params section + first N lines of core logic.
+
+    Returns a truncated source string suitable for LLM context.
+    """
+    filepath = _get_strategy_file_path()
+    if not os.path.isfile(filepath):
+        return ""
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return ""
+
+    # Collect input section (all lines starting with 'input ')
+    input_lines = []
+    for i, line in enumerate(lines):
+        if line.strip().startswith("input "):
+            input_lines.append(f"{i+1}: {line.rstrip()}")
+
+    # Collect first max_lines of logic (after includes/properties)
+    logic_start = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("//") and not stripped.startswith("#") and not stripped.startswith("input "):
+            if "OnTick" in stripped or "OnInit" in stripped or "void " in stripped or "int " in stripped or "double " in stripped:
+                logic_start = i
+                break
+
+    logic_lines = []
+    for i in range(logic_start, min(logic_start + max_lines, len(lines))):
+        logic_lines.append(f"{i+1}: {lines[i].rstrip()}")
+
+    parts = []
+    if input_lines:
+        parts.append("=== Input Parameters ===\n" + "\n".join(input_lines))
+    if logic_lines:
+        parts.append(f"=== Core Logic (line {logic_start+1}-{logic_start+len(logic_lines)}) ===\n" + "\n".join(logic_lines))
+
+    return "\n\n".join(parts)
+
+
+def _get_param_diff() -> list[dict]:
+    """Compare source code default params vs runtime params from chart profile.
+
+    Returns list of {name, source_value, runtime_value} for differing params.
+    """
+    # Source defaults
+    filepath = _get_strategy_file_path()
+    if not os.path.isfile(filepath):
+        return []
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        return []
+    source_params = {p["name"]: p["value"] for p in _parse_input_params(content)}
+
+    # Runtime params
+    runtime = _load_params_from_chart_profiles()
+    if not runtime:
+        return []
+
+    diffs = []
+    for name, source_val in source_params.items():
+        runtime_val = runtime.get(name)
+        if runtime_val is not None and str(runtime_val).strip() != str(source_val).strip():
+            diffs.append({
+                "name": name,
+                "source_default": source_val,
+                "runtime_value": runtime_val,
+            })
+    return diffs
+
+
+def _get_backup_dir() -> str:
+    """Return the backup directory for strategy files."""
+    src = _get_strategy_file_path()
+    backup_dir = os.path.join(os.path.dirname(src), ".ea_backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    return backup_dir
+
+
+def _get_backup_manifest_path() -> str:
+    return os.path.join(_get_backup_dir(), "manifest.json")
+
+
+def _load_backup_manifest() -> list[dict]:
+    path = _get_backup_manifest_path()
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_backup_manifest(entries: list[dict]) -> None:
+    path = _get_backup_manifest_path()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(entries, f, ensure_ascii=False, indent=2)
+
+
+def _backup_strategy(change_note: str = "") -> str:
+    """Create a timestamped backup with optional change note. Returns backup path."""
     src = _get_strategy_file_path()
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    dst = f"{src}.{ts}.bak"
+    backup_dir = _get_backup_dir()
+    ea_basename = os.path.basename(src)
+    dst = os.path.join(backup_dir, f"{ea_basename}.{ts}.bak")
     shutil.copy2(src, dst)
+
+    # Update manifest
+    manifest = _load_backup_manifest()
+    manifest.append({
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "file": os.path.basename(dst),
+        "source": ea_basename,
+        "change_note": change_note or "",
+    })
+    _save_backup_manifest(manifest)
     return dst
 
 
 def _get_metaeditor_path() -> str:
-    """Get MetaEditor64.exe path from env or default."""
-    return os.getenv(
-        "METAEDITOR_PATH",
-        r"C:\Program Files\MetaTrader 5\MetaEditor64.exe"
-    )
+    """Get MetaEditor64.exe path.
+
+    Resolution order:
+    1. METAEDITOR_PATH env var
+    2. Auto-detect from MT5 terminal_info().path (same dir as terminal64.exe)
+    3. Fallback default
+    """
+    env_path = os.getenv("METAEDITOR_PATH")
+    if env_path and os.path.isfile(env_path):
+        return env_path
+
+    # Auto-detect: MetaEditor64.exe is in the same directory as terminal64.exe
+    try:
+        info = mt5.terminal_info()
+        if info and info.path:
+            me_path = os.path.join(os.path.dirname(info.path), "MetaEditor64.exe")
+            if os.path.isfile(me_path):
+                return me_path
+    except Exception:
+        pass
+
+    return r"C:\Program Files\MetaTrader 5\MetaEditor64.exe"
 
 
 # ============== MCP 工具定义 ==============
@@ -2563,8 +2834,32 @@ def get_all_tools() -> list[Tool]:
         ),
         Tool(
             name="compile_strategy",
-            description="使用 MetaEditor64 编译 GMarket.mq5，返回编译结果和错误信息。",
+            description="使用 MetaEditor64 编译当前 EA，返回编译结果和错误信息。MetaEditor 从 MT5 安装目录自动检测。",
             inputSchema={"type": "object", "properties": {}, "required": []}
+        ),
+        Tool(
+            name="get_strategy_backups",
+            description="获取 EA 策略的历史备份版本列表（含时间戳和变更说明）。可查看指定版本的源码内容。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "version_file": {
+                        "type": "string",
+                        "description": "指定备份文件名以查看其内容（从列表中选取）。不填则返回版本列表。"
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "查看备份内容时的起始行号，默认 1。",
+                        "default": 1
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "查看备份内容时的结束行号，默认 50。",
+                        "default": 50
+                    }
+                },
+                "required": []
+            }
         ),
     ]
 
@@ -2710,7 +3005,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     {"error": f"Parameter '{param_name}' not found in strategy file"}, ensure_ascii=False))]
 
             old_value = m.group(2).strip()
-            backup_path = _backup_strategy()
+            backup_path = _backup_strategy(change_note=f"update param {param_name}: {old_value} -> {new_value}")
             new_content = pattern.sub(rf'\g<1>{new_value} \3', content)
 
             with open(filepath, "w", encoding="utf-8") as f:
@@ -2755,7 +3050,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
             # Execute replacement
-            backup_path = _backup_strategy()
+            note = f"patch: {count} replacement(s), search='{search[:50]}'"
+            backup_path = _backup_strategy(change_note=note)
             new_content = content.replace(search, replace)
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(new_content)
@@ -2775,13 +3071,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             if not os.path.isfile(metaeditor):
                 return [TextContent(type="text", text=json.dumps(
                     {"error": f"MetaEditor64 not found at: {metaeditor}. "
-                              "Set METAEDITOR_PATH environment variable to the correct path."},
+                              "MetaEditor64.exe should be in the same directory as your MT5 terminal. "
+                              "You can also set METAEDITOR_PATH environment variable."},
                     ensure_ascii=False))]
 
+            # Build compile command with include path
+            compile_args = [metaeditor, f"/compile:{filepath}"]
+            data_path = _get_mt5_data_path()
+            if data_path:
+                include_path = os.path.join(data_path, "MQL5")
+                compile_args.append(f"/include:{include_path}")
+
             log_file_path = filepath + ".compile.log"
+            compile_args.append(f"/log:{log_file_path}")
             try:
                 proc = subprocess.run(
-                    [metaeditor, f"/compile:{filepath}", f"/log:{log_file_path}"],
+                    compile_args,
                     capture_output=True, text=True, timeout=60
                 )
             except subprocess.TimeoutExpired:
@@ -2807,6 +3112,49 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 "log": compile_log[-3000:] if len(compile_log) > 3000 else compile_log
             }
             logging.info(f"Strategy compilation: {'SUCCESS' if success else 'FAILED'}")
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+        if name == "get_strategy_backups":
+            version_file = arguments.get("version_file")
+            if not version_file:
+                # Return backup list
+                manifest = _load_backup_manifest()
+                result = {
+                    "backup_dir": _get_backup_dir(),
+                    "count": len(manifest),
+                    "versions": list(reversed(manifest))  # newest first
+                }
+                return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+            # Read specific backup file content
+            backup_dir = _get_backup_dir()
+            backup_path = os.path.join(backup_dir, os.path.basename(version_file))
+            if not os.path.isfile(backup_path):
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": f"Backup file not found: {version_file}"}, ensure_ascii=False))]
+
+            with open(backup_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            start = max(1, int(arguments.get("start_line", 1)))
+            end = min(int(arguments.get("end_line", 50)), len(lines))
+            numbered = [f"{i}: {lines[i-1].rstrip()}" for i in range(start, end + 1)]
+
+            # Find change note from manifest
+            manifest = _load_backup_manifest()
+            change_note = ""
+            for entry in manifest:
+                if entry.get("file") == os.path.basename(version_file):
+                    change_note = entry.get("change_note", "")
+                    break
+
+            result = {
+                "file": version_file,
+                "change_note": change_note,
+                "total_lines": len(lines),
+                "range": f"{start}-{end}",
+                "content": "\n".join(numbered)
+            }
             return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}, ensure_ascii=False))]
@@ -2891,12 +3239,30 @@ async def get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptRe
     state = status.get("strategy_state", {})
 
     if name == "analyze_trading_situation":
+        # Enrich with runtime params and recent EA logs
+        param_diff = _get_param_diff()
+        param_diff_text = ""
+        if param_diff:
+            param_diff_text = "\nParameter deviations (source vs runtime):\n" + json.dumps(param_diff, ensure_ascii=False, indent=2)
+
+        ea_logs_text = ""
+        data_path = _get_mt5_data_path()
+        if data_path:
+            ea_log_dir = os.path.join(data_path, "MQL5", "Logs")
+            today = datetime.now().strftime("%Y-%m-%d")
+            ea_result = _read_mt5_log(ea_log_dir, today, page_size=20, page=1)
+            if "lines" in ea_result and ea_result["lines"]:
+                ea_logs_text = "\nRecent EA logs:\n" + "\n".join(ea_result["lines"])
+
         text = f"""Analyze the current trading situation and provide suggestions.
 Market: {market.get('symbol')} bid={market.get('bid')} ask={market.get('ask')}
 Positions: total={summary.get('positions_total')} buy={summary.get('buy_count')} sell={summary.get('sell_count')} net_volume={summary.get('net_volume')}
 P/L: {total_profit}
 State: running={state.get('running')} open_position={state.get('is_open_position')}
 Config: max_loss={config.get('parameters', {}).get('max_loss')} magic_numbers={config.get('parameters', {}).get('magic_numbers')}
+Set parameters: {json.dumps(config.get('set_parameters', {}), ensure_ascii=False)}
+{param_diff_text}
+{ea_logs_text}
 """
         return GetPromptResult(
             description="Analyze current trading situation",
