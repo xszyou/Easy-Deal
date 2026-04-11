@@ -1,0 +1,203 @@
+{
+  "meta": {
+    "lastTouchedVersion": "2026.4.1",
+    "lastTouchedAt": "2026-04-03T03:30:40.164Z"
+  },
+  "wizard": {
+    "lastRunAt": "2026-03-18T06:32:12.444Z",
+    "lastRunVersion": "2026.3.13",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local"
+  },
+  "auth": {
+    "profiles": {
+      "openai:default": {
+        "provider": "openai",
+        "mode": "api_key"
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "fay": {
+        "baseUrl": "http://172.23.48.1:5000/v1",
+        "apiKey": "sk-fay",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "llm",
+            "name": "Fay LLM",
+            "contextWindow": 256000,
+            "maxTokens": 32768
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "fay/llm"
+      },
+      "models": {
+        "fay/llm": {
+          "alias": "fay llm"
+        }
+      },
+      "compaction": {
+        "mode": "default"
+      },
+      "workspace": "~/.openclaw/workspaces/forex-commander",
+      "subagents": {
+        "maxConcurrent": 8,
+        "maxSpawnDepth": 2,
+        "maxChildrenPerAgent": 4,
+        "runTimeoutSeconds": 120,
+        "archiveAfterMinutes": 60
+      }
+    },
+    "list": [
+      {
+        "id": "forex-commander",
+        "name": "交易指挥官",
+        "default": true,
+        "workspace": "~/.openclaw/workspaces/forex-commander",
+        "agentDir": "~/.openclaw/agents/forex-commander/agent",
+        "model": {
+          "primary": "fay/llm"
+        },
+        "subagents": {
+          "allowAgents": [
+            "ea-supervisor",
+            "strategy-analyst",
+            "risk-guard"
+          ],
+          "requireAgentId": true
+        }
+      },
+      {
+        "id": "ea-supervisor",
+        "name": "EA 监管员",
+        "workspace": "~/.openclaw/workspaces/ea-supervisor",
+        "agentDir": "~/.openclaw/agents/ea-supervisor/agent",
+        "model": {
+          "primary": "fay/llm"
+        }
+      },
+      {
+        "id": "strategy-analyst",
+        "name": "策略分析师",
+        "workspace": "~/.openclaw/workspaces/strategy-analyst",
+        "agentDir": "~/.openclaw/agents/strategy-analyst/agent",
+        "model": {
+          "primary": "fay/llm"
+        }
+      },
+      {
+        "id": "risk-guard",
+        "name": "风控员",
+        "workspace": "~/.openclaw/workspaces/risk-guard",
+        "agentDir": "~/.openclaw/agents/risk-guard/agent",
+        "model": {
+          "primary": "fay/llm"
+        }
+      }
+    ]
+  },
+  "bindings": [
+    {
+      "agentId": "forex-commander",
+      "match": {
+        "channel": "wechat"
+      }
+    }
+  ],
+  "tools": {
+    "profile": "full",
+    "sessions": {
+      "visibility": "tree"
+    },
+    "agentToAgent": {
+      "enabled": false,
+      "allow": [
+        "forex-commander"
+      ]
+    }
+  },
+  "cron": {
+    "enabled": true,
+    "maxConcurrentRuns": 2,
+    "sessionRetention": "48h"
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "channels": {
+    "openclaw-weixin": {
+      "accounts": {}
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "78f68b1554f39d2d953cc01cbc273f66a804c346b72e84e6"
+    },
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "nodes": {
+      "denyCommands": [
+        "camera.snap",
+        "camera.clip",
+        "screen.record",
+        "contacts.add",
+        "calendar.add",
+        "reminders.add",
+        "sms.send"
+      ]
+    }
+  },
+  "plugins": {
+    "load": {
+      "paths": []
+    },
+    "entries": {
+      "openclaw-weixin": {
+        "enabled": true
+      }
+    },
+    "installs": {
+      "openclaw-weixin": {
+        "source": "npm",
+        "spec": "@tencent-weixin/openclaw-weixin",
+        "installPath": "/root/.openclaw/extensions/openclaw-weixin",
+        "version": "2.0.1",
+        "resolvedName": "@tencent-weixin/openclaw-weixin",
+        "resolvedVersion": "2.0.1",
+        "resolvedSpec": "@tencent-weixin/openclaw-weixin@2.0.1",
+        "integrity": "sha512-Ib7onvLU8a1ox9craMZxPwrN+ffJQJbToZzeMwoYryBOMIoBlVY0oCuQF7BZvZ7GRQQKOSSAdxvFkO47hKu0rg==",
+        "shasum": "06339fdc83226454e1286221889fd62c76ae2463",
+        "resolvedAt": "2026-03-26T08:39:45.134Z",
+        "installedAt": "2026-03-26T08:39:56.609Z"
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "faymcp": {
+        "url": "http://172.23.48.1:8765/sse"
+      }
+    }
+  }
+}

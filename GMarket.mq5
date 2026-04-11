@@ -18,7 +18,7 @@
 
 // 输入参数
 input double firstLots = 0.01; // 起手大小
-input double step = 0.8; //梯级（百分比）
+input double step = 0.8 ; //梯级（最终验证版-20260408）
 input double martinInterval = 1.2; //马丁最小矩离（百分比）
 input double filter = 0.1; //虑波器（百分比）
 input int orderTime = 0; //开单间隔（秒）
@@ -93,6 +93,41 @@ long lastBreakevenTicket = -1;
 int atrHandle = INVALID_HANDLE;
 int bandsHandle = INVALID_HANDLE;
 int slippagePoints = 200;
+
+string GetMarginModeName(long marginMode)
+{
+   if (marginMode == ACCOUNT_MARGIN_MODE_RETAIL_NETTING){
+      return "RETAIL_NETTING";
+   }
+   if (marginMode == ACCOUNT_MARGIN_MODE_EXCHANGE){
+      return "EXCHANGE";
+   }
+   if (marginMode == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING){
+      return "RETAIL_HEDGING";
+   }
+   return "UNKNOWN";
+}
+
+ENUM_ORDER_TYPE_FILLING GetSymbolFillingMode()
+{
+   long fillingMode = 0;
+   if (!SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE, fillingMode)){
+      return ORDER_FILLING_IOC;
+   }
+
+   long executionMode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_EXEMODE);
+   if ((fillingMode & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC){
+      return ORDER_FILLING_IOC;
+   }
+   if ((fillingMode & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK){
+      return ORDER_FILLING_FOK;
+   }
+
+   if (executionMode != SYMBOL_TRADE_EXECUTION_MARKET){
+      return ORDER_FILLING_RETURN;
+   }
+   return ORDER_FILLING_IOC;
+}
 
 double GetBid()
 {
@@ -253,11 +288,14 @@ long SendMarketOrder(ENUM_ORDER_TYPE orderType, double volume, string comment)
    request.deviation = slippagePoints;
    request.magic = MAGIC_NUMBER;
    request.comment = comment;
-   request.type_filling = ORDER_FILLING_IOC;
+   request.type_filling = GetSymbolFillingMode();
 
    MarkTradeAction();
+   ResetLastError();
    if (!OrderSend(request, result) || result.retcode != TRADE_RETCODE_DONE){
-      PrintFormat("OrderSend failed: retcode=%d lastError=%d comment=%s",
+      string orderTypeName = orderType == ORDER_TYPE_BUY ? "BUY" : "SELL";
+      PrintFormat("OrderSend failed: type=%s volume=%.2f price=%.5f filling=%d retcode=%d lastError=%d comment=%s",
+                  orderTypeName, volume, price, (int)request.type_filling,
                   (int)result.retcode, GetLastError(), result.comment);
       return -1;
    }
@@ -298,10 +336,14 @@ bool ClosePositionByTicket(long ticket)
    request.deviation = slippagePoints;
    request.magic = (int)magic;
    request.comment = "Close position";
-   request.type_filling = ORDER_FILLING_IOC;
+   request.type_filling = GetSymbolFillingMode();
 
    MarkTradeAction();
+   ResetLastError();
    if (!OrderSend(request, result) || result.retcode != TRADE_RETCODE_DONE){
+      PrintFormat("Close position failed: ticket=%I64d filling=%d retcode=%d lastError=%d comment=%s",
+                  ticket, (int)request.type_filling, (int)result.retcode,
+                  GetLastError(), result.comment);
       return false;
    }
    return true;
@@ -852,7 +894,15 @@ int OnInit()
     nextLadderResetAttemptTime = 0;
     nextLadderResetAttemptTime = 0;
 
+    long marginMode = AccountInfoInteger(ACCOUNT_MARGIN_MODE);
+    if (marginMode != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING){
+       PrintFormat("Init failed: this EA requires a hedging account, current margin mode=%s",
+                   GetMarginModeName(marginMode));
+       return(INIT_FAILED);
+    }
+
     // 初始化代码
+    atrHandle = iATR(_Symbol, PERIOD_H1, 14);
     atrHandle = iATR(_Symbol, PERIOD_H1, 14);
     bandsHandle = iBands(_Symbol, PERIOD_H1, 20, 0, 2.0, PRICE_CLOSE);
     openTime = TimeCurrent() + orderTime;
@@ -944,6 +994,8 @@ void CheckEntryConditions()
             if (lastSellOrderTick > 0) {
                ClosePositionByTicket(lastSellOrderTick);
             }
+            lastBuyOrderTick = -1;
+            lastSellOrderTick = -1;
             isFollow = false;
            int retryDelay = retrySeconds > 0 ? retrySeconds : 1800;
            openTime = TimeCurrent() + retryDelay;

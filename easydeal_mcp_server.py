@@ -962,6 +962,7 @@ class TradingMonitor:
         
         # 新增追踪变量
         self.last_orders_map = {}  # ticket -> order_info
+        self.orders_map_primed = False  # 首次快照前不触发 order_change 预警
         self.last_terminal_connected = True
         self.last_equity_log_time = 0
         self.equity_log_interval = 3600  # 每小时记录一次资金快照
@@ -1306,6 +1307,20 @@ class TradingMonitor:
         
         current_tickets = set(current_orders.keys())
         last_tickets = set(self.last_orders_map.keys())
+
+        # 首次检查：仅对齐缓存，避免把已存在的持仓误报为新开仓
+        if not self.orders_map_primed:
+            self.last_orders_map = current_orders
+            self.last_status = status
+            self.orders_map_primed = True
+            monitor_logger.info(
+                f"订单缓存初始化完成，当前持仓 {len(current_orders)} 笔，跳过首次 order_change 预警"
+            )
+            return {
+                "positions": len(current_tickets),
+                "profit": status["orders"]["total_profit"],
+                "alerts": alerts,
+            }
 
         # 检测新开仓
         new_tickets = current_tickets - last_tickets
