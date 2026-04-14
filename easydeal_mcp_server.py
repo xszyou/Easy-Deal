@@ -1460,7 +1460,14 @@ class FileCallback:
 
 
 class AgentCallback:
-    """Agent 终端回调"""
+    """Agent 终端回调
+
+    - danger / critical → 透传给 Fay，触发对话回复
+    - info / warning    → 记录为 Fay 观察记忆，不触发回复
+    """
+
+    # 需要透传（触发 Fay 回复）的级别
+    PASSTHROUGH_LEVELS = {"danger", "critical"}
 
     def __init__(self, url: str = "http://127.0.0.1:5000/transparent-pass",
                  api_key: str = "YOUR_API_KEY",
@@ -1475,6 +1482,8 @@ class AgentCallback:
         self.cooldown = cooldown
         self.user = user
         self.last_alert_time = {}
+        # 从透传 URL 推导 Fay 基地址（用于观察记忆接口）
+        self.fay_base_url = url.rsplit("/", 1)[0] if "/" in url else url
 
     def __call__(self, event: dict):
         alert_key = f"{event['event_type']}:{event['level']}"
@@ -1484,30 +1493,50 @@ class AgentCallback:
                 return
         self.last_alert_time[alert_key] = now
 
-        try:
-            level_emoji = {"info": "ℹ️", "warning": "⚠️", "danger": "🚨", "critical": "🆘"}
-            emoji = level_emoji.get(event["level"], "📢")
+        level = event.get("level", "info")
+        level_emoji = {"info": "ℹ️", "warning": "⚠️", "danger": "🚨", "critical": "🆘"}
+        emoji = level_emoji.get(level, "📢")
 
-            prompt = f"""{emoji} 交易预警通知
+        text = f"""{emoji} 交易预警通知
 
 类型: {event['event_type']}
-级别: {event['level'].upper()}
+级别: {level.upper()}
 时间: {event['timestamp']}
 消息: {event['message']}
 数据: {json.dumps(event.get('data', {}), ensure_ascii=False)}"""
 
+        if level in self.PASSTHROUGH_LEVELS:
+            self._send_passthrough(text)
+        else:
+            self._send_observation(text)
+
+    def _send_passthrough(self, text: str):
+        """重要告警 → 透传给 Fay，触发对话回复"""
+        try:
+            payload = {"user": self.user, "text": text}
+            response = requests.post(self.url, json=payload, timeout=10)
+            if response.status_code != 200:
+                monitor_logger.error(f"Agent透传失败，状态码：{response.status_code}")
+        except Exception as e:
+            monitor_logger.error(f"Agent透传执行失败: {e}")
+
+    def _send_observation(self, text: str):
+        """一般告警 → 记录为 Fay 观察记忆，不触发回复"""
+        try:
+            obs_url = f"{self.fay_base_url}/api/send"
             payload = {
                 "user": self.user,
-                "text": prompt,
+                "content": text,
+                "observation": text,
+                "no_reply": True,
             }
-
-            response = requests.post(self.url, json=payload, timeout=10)
-
+            response = requests.post(obs_url, json=payload, timeout=10)
             if response.status_code != 200:
-                monitor_logger.error(f"Agent回调失败，状态码：{response.status_code}")
-
+                monitor_logger.error(f"Agent观察记录失败，状态码：{response.status_code}")
+            else:
+                monitor_logger.info(f"告警已记录为观察记忆: {text[:80]}")
         except Exception as e:
-            monitor_logger.error(f"Agent回调执行失败: {e}")
+            monitor_logger.error(f"Agent观察记录失败: {e}")
 
 
 # ============== Flask API 路由 ==============
