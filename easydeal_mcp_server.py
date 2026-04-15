@@ -994,7 +994,8 @@ class TradingMonitor:
             "event_type": event_type,
             "level": level,
             "message": message,
-            "data": data or {}
+            "data": data or {},
+            "alert_key": alert_key,
         }
 
         monitor_logger.log(
@@ -1486,7 +1487,8 @@ class AgentCallback:
         self.fay_base_url = url.rsplit("/", 1)[0] if "/" in url else url
 
     def __call__(self, event: dict):
-        alert_key = f"{event['event_type']}:{event['level']}"
+        # 优先使用 notify 传入的细粒度 alert_key（如 order_change:open:12345）
+        alert_key = event.get("alert_key") or f"{event['event_type']}:{event['level']}"
         now = time.time()
         if alert_key in self.last_alert_time:
             if now - self.last_alert_time[alert_key] < self.cooldown:
