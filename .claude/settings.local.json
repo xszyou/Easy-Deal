@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(dir:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('easydeal_mcp_server.py', doraise=True\\)\")",
+      "Bash(python:*)",
+      "Bash(ls:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": []

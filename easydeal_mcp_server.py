@@ -107,7 +107,7 @@ class TradingContext:
         profile_path = os.getenv("EA_PROFILE_PATH")
         self.profile_path = profile_path if profile_path else "monitor_profile.json"
         self.profile = {}
-        self.symbols = ["XAUUSDm", "XAUUSDc", "XAUUSD"]
+        self.symbols = ["GOLD", "GOLD#", "XAUUSDm", "XAUUSDc", "XAUUSD"]
         self.symbol = self.symbols[0]
         self.magic_numbers = [999]
         self.magic_number = self.magic_numbers[0]
@@ -119,6 +119,23 @@ class TradingContext:
             base_dir = os.path.dirname(os.path.abspath(__file__))
             self.set_path = os.path.abspath(os.path.join(base_dir, "..", "config.set"))
         self.set_parameters = {}
+
+        # 设置有效期（可选）
+        self.expiry_date = None
+        self.running = True
+
+        # 运行状态
+        self.is_open_position = False
+
+        # Initialize MT5 connection — must happen before loading set/profile
+        # so that mt5.terminal_info() and mt5.symbol_info() are available
+        if not mt5.initialize():
+            logging.error("MT5初始化失败")
+            print("MT5初始化失败")
+            self.running = False
+            return
+
+        # 加载 set 文件（需要 MT5 已初始化，fallback 依赖 terminal_info）
         set_ok, set_msg = self.load_set_file(self.set_path)
         if not set_ok:
             logging.warning(f"Set file load failed: {set_msg}")
@@ -142,39 +159,26 @@ class TradingContext:
                 except Exception as exc:
                     logging.warning(f"EA source param fallback failed: {exc}")
 
-        # 设置有效期（可选）
-        self.expiry_date = None
-        self.running = True
+        ok, msg = self.load_profile(self.profile_path)
+        if not ok:
+            logging.warning(f"配置文件加载失败: {msg}")
 
-        # 运行状态
-        self.is_open_position = False
+        env_ok, env_msg = self.apply_env_profile()
+        if env_ok:
+            logging.info(f"已应用环境变量配置: {env_msg}")
+        elif env_msg != "未设置环境变量配置":
+            logging.warning(f"环境变量配置无效: {env_msg}")
 
-        # Initialize MT5 connection
-        if not mt5.initialize():
-            logging.error("MT5初始化失败")
-            print("MT5初始化失败")
+        # 验证币对是否存在
+        symbol_info = mt5.symbol_info(self.symbol)
+        if symbol_info is None:
+            logging.error(f"错误: MT5中不存在币对 {self.symbol}")
+            print(f"错误: MT5中不存在币对 {self.symbol}")
             self.running = False
-        else:
-            ok, msg = self.load_profile(self.profile_path)
-            if not ok:
-                logging.warning(f"配置文件加载失败: {msg}")
+            return
 
-            env_ok, env_msg = self.apply_env_profile()
-            if env_ok:
-                logging.info(f"已应用环境变量配置: {env_msg}")
-            elif env_msg != "未设置环境变量配置":
-                logging.warning(f"环境变量配置无效: {env_msg}")
-
-            # 验证币对是否存在
-            symbol_info = mt5.symbol_info(self.symbol)
-            if symbol_info is None:
-                logging.error(f"错误: MT5中不存在币对 {self.symbol}")
-                print(f"错误: MT5中不存在币对 {self.symbol}")
-                self.running = False
-                return
-
-            self.refresh_position_state()
-            logging.info(f"载入交易上下文，交易币对: {self.symbol}")
+        self.refresh_position_state()
+        logging.info(f"载入交易上下文，交易币对: {self.symbol}")
 
     def get_config_info(self):
         """获取配置信息"""
@@ -354,7 +358,7 @@ class TradingContext:
     def apply_env_profile(self) -> tuple[bool, str]:
         profile = {}
 
-        symbols_env = os.getenv("EA_SYMBOLS", "XAUUSD,XAUUSDm,XAUUSDc")
+        symbols_env = os.getenv("EA_SYMBOLS", "GOLD,GOLD#,XAUUSD,XAUUSDm,XAUUSDc")
         profile["symbols"] = self._split_env_list(symbols_env)
 
         magics_env = os.getenv("EA_MAGIC_NUMBERS")
