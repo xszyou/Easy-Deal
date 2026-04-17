@@ -16,38 +16,58 @@
 #include <Trade/Trade.mqh>
 
 
-// 输入参数
-input double firstLots = 0.01; // 起手大小
-input double step = 0.8 ; //梯级（最终验证版-20260408）
-input double martinInterval = 1.2; //马丁最小矩离（百分比）
-input double filter = 0.1; //虑波器（百分比）
-input int orderTime = 0; //开单间隔（秒）
-input int retrySeconds = 1800; //重试间隔（秒）
-input bool InpIsPaused = false; // 暂停策略执行
-input bool InpMartinEnabled = true; //马丁开关
-input bool InpIgnoreMagicNumber = true; //是否忽略魔术数（手操计入）
-input double maxLoss = 3000; //最大浮亏
-input int maxMartinLevel = 3; //最大马丁层数
-input double maxAtrPct = 1.5; //允许马丁的最大ATR 百分比
-input double maxBollDeviation = 2.0; //允许马丁的最大布林带偏离
-input double martinBreakevenProfit = 0.0; //马丁零损保护缓冲金额，<=0 关闭
-input bool InpLogicalBreakeven = true; // 逻辑零损保护（不修改订单）
-input bool InpBreakevenResetLadder = true; //零损时平掉爬梯方向base并重开
-input bool InpNewsFilterEnabled = true; // 允许马丁的新闻过滤开关
-input int InpNewsBeforeMinutes = 60; // 新闻前暂停分钟数
-input int InpNewsAfterMinutes = 60; // 新闻后暂停分钟数
-input bool InpNewsHighImportance = true; // 过滤高重要性新闻
-input bool InpNewsMediumImportance = false; // 过滤中重要性新闻
+// 输入参数 (默认值；运行时可被 MQL5/Files/GMarket_config.set 覆盖)
+input double InpFirstLots = 0.01;              // 起手大小
+input double InpStep = 0.8;                    // 梯级（百分比）
+input double InpMartinInterval = 1.2;          // 马丁最小矩离（百分比）
+input double InpFilter = 0.1;                  // 虑波器（百分比）
+input int    InpOrderTime = 0;                 // 开单间隔（秒）
+input int    InpRetrySeconds = 1800;           // 重试间隔（秒）
+input bool   InpIsPaused = false;              // 暂停策略执行
+input bool   InpMartinEnabled = true;          // 马丁开关
+input bool   InpIgnoreMagicNumber = true;      // 是否忽略魔术数（手操计入）
+input double InpMaxLoss = 3000;                // 最大浮亏
+input int    InpMaxMartinLevel = 3;            // 最大马丁层数
+input double InpMaxAtrPct = 1.5;               // 允许马丁的最大ATR 百分比
+input double InpMaxBollDeviation = 2.0;        // 允许马丁的最大布林带偏离
+input double InpMartinBreakevenProfit = 0.0;   // 马丁零损保护缓冲金额，<=0 关闭
+input bool   InpLogicalBreakeven = true;       // 逻辑零损保护（不修改订单）
+input bool   InpBreakevenResetLadder = true;   // 零损时平掉爬梯方向base并重开
+input bool   InpNewsFilterEnabled = true;      // 允许马丁的新闻过滤开关
+input int    InpNewsBeforeMinutes = 60;        // 新闻前暂停分钟数
+input int    InpNewsAfterMinutes = 60;         // 新闻后暂停分钟数
+input bool   InpNewsHighImportance = true;     // 过滤高重要性新闻
+input bool   InpNewsMediumImportance = false;  // 过滤中重要性新闻
+input int    InpMagicNumber = 999;             // 魔术数
 
-input int MAGIC_NUMBER = 999; //魔术数
+// ===== Runtime globals (writable; overridable by GMarket_config.set) =====
+// Body code reads these; OnInit seeds them from Inp*; ReloadRuntimeConfig overrides from file.
+double firstLots;
+double step;
+double martinInterval;
+double filter;
+int    orderTime;
+int    retrySeconds;
+bool   isPaused;
+bool   martinEnabled;
+bool   ignoreMagicNumber;
+double maxLoss;
+int    maxMartinLevel;
+double maxAtrPct;
+double maxBollDeviation;
+double martinBreakevenProfit;
+bool   logicalBreakevenEnabled;
+bool   breakevenResetLadderEnabled;
+bool   newsFilterEnabled;
+int    newsBeforeMinutes;
+int    newsAfterMinutes;
+bool   newsHighImportance;
+bool   newsMediumImportance;
+int    MAGIC_NUMBER;
 
-// Global control variables
-bool isPaused;
-bool martinEnabled;
-bool ignoreMagicNumber;
-bool newsFilterEnabled;
-bool logicalBreakevenEnabled;
-bool breakevenResetLadderEnabled;
+// Config/trigger file state
+datetime g_lastConfigApplied = 0;      // content timestamp from config.set (ts= line)
+datetime g_lastReloadTrigger = 0;      // content timestamp from reload.trigger
 
 
 // UI Constants
@@ -877,22 +897,203 @@ void ApplyMartinBreakevenStops()
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
+// ---- runtime config / reload helpers ---------------------------------------
+
+// Copy Inp* input defaults into runtime globals. Called at OnInit (before config override).
+void SeedRuntimeFromInputs()
+  {
+    firstLots                   = InpFirstLots;
+    step                        = InpStep;
+    martinInterval              = InpMartinInterval;
+    filter                      = InpFilter;
+    orderTime                   = InpOrderTime;
+    retrySeconds                = InpRetrySeconds;
+    isPaused                    = InpIsPaused;
+    martinEnabled               = InpMartinEnabled;
+    ignoreMagicNumber           = InpIgnoreMagicNumber;
+    maxLoss                     = InpMaxLoss;
+    maxMartinLevel              = InpMaxMartinLevel;
+    maxAtrPct                   = InpMaxAtrPct;
+    maxBollDeviation            = InpMaxBollDeviation;
+    martinBreakevenProfit       = InpMartinBreakevenProfit;
+    logicalBreakevenEnabled     = InpLogicalBreakeven;
+    breakevenResetLadderEnabled = InpBreakevenResetLadder;
+    newsFilterEnabled           = InpNewsFilterEnabled;
+    newsBeforeMinutes           = InpNewsBeforeMinutes;
+    newsAfterMinutes            = InpNewsAfterMinutes;
+    newsHighImportance          = InpNewsHighImportance;
+    newsMediumImportance        = InpNewsMediumImportance;
+    MAGIC_NUMBER                = InpMagicNumber;
+  }
+
+bool ParseBoolValue(string v)
+  {
+    StringToLower(v);
+    return (v == "true" || v == "1" || v == "yes" || v == "on");
+  }
+
+// Apply one key=value override. Returns true if key is recognized.
+bool ApplyRuntimeOverride(string key, string val)
+  {
+    if (key == "InpFirstLots")             { firstLots = StringToDouble(val); return true; }
+    if (key == "InpStep")                  { step = StringToDouble(val); return true; }
+    if (key == "InpMartinInterval")        { martinInterval = StringToDouble(val); return true; }
+    if (key == "InpFilter")                { filter = StringToDouble(val); return true; }
+    if (key == "InpOrderTime")             { orderTime = (int)StringToInteger(val); return true; }
+    if (key == "InpRetrySeconds")          { retrySeconds = (int)StringToInteger(val); return true; }
+    if (key == "InpIsPaused")              { isPaused = ParseBoolValue(val); return true; }
+    if (key == "InpMartinEnabled")         { martinEnabled = ParseBoolValue(val); return true; }
+    if (key == "InpIgnoreMagicNumber")     { ignoreMagicNumber = ParseBoolValue(val); return true; }
+    if (key == "InpMaxLoss")               { maxLoss = StringToDouble(val); return true; }
+    if (key == "InpMaxMartinLevel")        { maxMartinLevel = (int)StringToInteger(val); return true; }
+    if (key == "InpMaxAtrPct")             { maxAtrPct = StringToDouble(val); return true; }
+    if (key == "InpMaxBollDeviation")      { maxBollDeviation = StringToDouble(val); return true; }
+    if (key == "InpMartinBreakevenProfit") { martinBreakevenProfit = StringToDouble(val); return true; }
+    if (key == "InpLogicalBreakeven")      { logicalBreakevenEnabled = ParseBoolValue(val); return true; }
+    if (key == "InpBreakevenResetLadder")  { breakevenResetLadderEnabled = ParseBoolValue(val); return true; }
+    if (key == "InpNewsFilterEnabled")     { newsFilterEnabled = ParseBoolValue(val); return true; }
+    if (key == "InpNewsBeforeMinutes")     { newsBeforeMinutes = (int)StringToInteger(val); return true; }
+    if (key == "InpNewsAfterMinutes")      { newsAfterMinutes = (int)StringToInteger(val); return true; }
+    if (key == "InpNewsHighImportance")    { newsHighImportance = ParseBoolValue(val); return true; }
+    if (key == "InpNewsMediumImportance")  { newsMediumImportance = ParseBoolValue(val); return true; }
+    if (key == "InpMagicNumber")           { MAGIC_NUMBER = (int)StringToInteger(val); return true; }
+    return false;
+  }
+
+// Read GMarket_config.set (written by MCP) and apply overrides.
+// If forceApply=false, skip when file mtime hasn't advanced since last apply.
+// Returns true if any overrides were applied.
+bool ReloadRuntimeConfig(bool forceApply)
+  {
+    string filename = "GMarket_config.set";
+    if (!FileIsExist(filename)) return false;
+
+    int fh = FileOpen(filename, FILE_READ | FILE_TXT | FILE_ANSI);
+    if (fh == INVALID_HANDLE) return false;
+
+    datetime mtime = (datetime)FileGetInteger(fh, FILE_MODIFY_DATE);
+    if (!forceApply && mtime > 0 && mtime <= g_lastConfigApplied){
+       FileClose(fh);
+       return false;
+    }
+
+    int applied = 0;
+    int unknown = 0;
+    while (!FileIsEnding(fh)){
+       string line = FileReadString(fh);
+       StringTrimLeft(line); StringTrimRight(line);
+       if (StringLen(line) == 0) continue;
+       if (StringGetCharacter(line, 0) == '#') continue;
+       int eq = StringFind(line, "=");
+       if (eq <= 0) continue;
+       string key = StringSubstr(line, 0, eq);
+       string val = StringSubstr(line, eq + 1);
+       StringTrimLeft(key); StringTrimRight(key);
+       StringTrimLeft(val); StringTrimRight(val);
+       if (key == "ts") continue;
+       if (ApplyRuntimeOverride(key, val)) applied++;
+       else unknown++;
+    }
+    FileClose(fh);
+
+    if (mtime > 0) g_lastConfigApplied = mtime;
+    if (applied > 0 || unknown > 0){
+       PrintFormat("ReloadRuntimeConfig: %d applied, %d unknown (mtime=%s)",
+                   applied, unknown, TimeToString(mtime, TIME_DATE | TIME_SECONDS));
+    }
+    return applied > 0;
+  }
+
+// Watch GMarket_reload.trigger (contains a timestamp). When it advances, force
+// a chart reinit so OnInit fires and picks up a freshly compiled .ex5.
+bool CheckReloadTrigger()
+  {
+    string filename = "GMarket_reload.trigger";
+    if (!FileIsExist(filename)) return false;
+    int fh = FileOpen(filename, FILE_READ | FILE_TXT | FILE_ANSI);
+    if (fh == INVALID_HANDLE) return false;
+    string content = "";
+    if (!FileIsEnding(fh)) content = FileReadString(fh);
+    FileClose(fh);
+    StringTrimLeft(content); StringTrimRight(content);
+    if (StringLen(content) == 0) return false;
+    datetime ts = (datetime)StringToInteger(content);
+    if (ts <= 0) return false;
+    if (g_lastReloadTrigger == 0){
+       g_lastReloadTrigger = ts;  // prime on first observation, don't fire
+       return false;
+    }
+    if (ts > g_lastReloadTrigger){
+       g_lastReloadTrigger = ts;
+       return true;
+    }
+    return false;
+  }
+
+// Dump current runtime parameter values to MQL5/Files/GMarket_runtime.json
+// so MCP can read the true runtime values (post-override).
+void DumpInputsRuntime()
+  {
+    string filename = "GMarket_runtime.json";
+    int fh = FileOpen(filename, FILE_WRITE | FILE_TXT | FILE_ANSI);
+    if (fh == INVALID_HANDLE){
+       PrintFormat("DumpInputsRuntime: FileOpen failed, err=%d", GetLastError());
+       return;
+    }
+    string ts = TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS);
+    string cfgTs = (g_lastConfigApplied > 0
+                    ? TimeToString(g_lastConfigApplied, TIME_DATE | TIME_SECONDS)
+                    : "");
+    string json = "{\n";
+    json += "  \"ea_name\": \"GMarket.mq5\",\n";
+    json += "  \"symbol\": \"" + _Symbol + "\",\n";
+    json += "  \"updated_at\": \"" + ts + "\",\n";
+    json += "  \"config_applied_at\": \"" + cfgTs + "\",\n";
+    json += "  \"magic_number\": " + IntegerToString(MAGIC_NUMBER) + ",\n";
+    json += "  \"params\": {\n";
+    json += "    \"InpFirstLots\": "             + DoubleToString(firstLots, 4) + ",\n";
+    json += "    \"InpStep\": "                  + DoubleToString(step, 4) + ",\n";
+    json += "    \"InpMartinInterval\": "        + DoubleToString(martinInterval, 4) + ",\n";
+    json += "    \"InpFilter\": "                + DoubleToString(filter, 4) + ",\n";
+    json += "    \"InpOrderTime\": "             + IntegerToString(orderTime) + ",\n";
+    json += "    \"InpRetrySeconds\": "          + IntegerToString(retrySeconds) + ",\n";
+    json += "    \"InpIsPaused\": "              + (isPaused ? "true" : "false") + ",\n";
+    json += "    \"InpMartinEnabled\": "         + (martinEnabled ? "true" : "false") + ",\n";
+    json += "    \"InpIgnoreMagicNumber\": "     + (ignoreMagicNumber ? "true" : "false") + ",\n";
+    json += "    \"InpMaxLoss\": "               + DoubleToString(maxLoss, 2) + ",\n";
+    json += "    \"InpMaxMartinLevel\": "        + IntegerToString(maxMartinLevel) + ",\n";
+    json += "    \"InpMaxAtrPct\": "             + DoubleToString(maxAtrPct, 4) + ",\n";
+    json += "    \"InpMaxBollDeviation\": "      + DoubleToString(maxBollDeviation, 4) + ",\n";
+    json += "    \"InpMartinBreakevenProfit\": " + DoubleToString(martinBreakevenProfit, 2) + ",\n";
+    json += "    \"InpLogicalBreakeven\": "      + (logicalBreakevenEnabled ? "true" : "false") + ",\n";
+    json += "    \"InpBreakevenResetLadder\": "  + (breakevenResetLadderEnabled ? "true" : "false") + ",\n";
+    json += "    \"InpNewsFilterEnabled\": "     + (newsFilterEnabled ? "true" : "false") + ",\n";
+    json += "    \"InpNewsBeforeMinutes\": "     + IntegerToString(newsBeforeMinutes) + ",\n";
+    json += "    \"InpNewsAfterMinutes\": "      + IntegerToString(newsAfterMinutes) + ",\n";
+    json += "    \"InpNewsHighImportance\": "    + (newsHighImportance ? "true" : "false") + ",\n";
+    json += "    \"InpNewsMediumImportance\": "  + (newsMediumImportance ? "true" : "false") + ",\n";
+    json += "    \"InpMagicNumber\": "           + IntegerToString(MAGIC_NUMBER) + "\n";
+    json += "  }\n";
+    json += "}\n";
+    FileWriteString(fh, json);
+    FileClose(fh);
+  }
+
 int OnInit()
   {
-    // Initialize globals from inputs
-    isPaused = InpIsPaused;
-    martinEnabled = InpMartinEnabled;
-    ignoreMagicNumber = InpIgnoreMagicNumber;
-    newsFilterEnabled = InpNewsFilterEnabled;
-    logicalBreakevenEnabled = InpLogicalBreakeven;
-    breakevenResetLadderEnabled = InpBreakevenResetLadder;
+    SeedRuntimeFromInputs();
+    ReloadRuntimeConfig(true);           // always apply overrides on init
+    // Prime reload trigger so we don't fire on a stale file immediately after attach.
+    CheckReloadTrigger();
+
     ClearBreakevenTargets();
     breakevenCycleActive = false;
     breakevenResetDone = false;
     breakevenCycleMartinTicket = -1;
     breakevenCycleBaseTicket = -1;
     nextLadderResetAttemptTime = 0;
-    nextLadderResetAttemptTime = 0;
+
+    DumpInputsRuntime();
 
     long marginMode = AccountInfoInteger(ACCOUNT_MARGIN_MODE);
     if (marginMode != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING){
@@ -903,17 +1104,35 @@ int OnInit()
 
     // 初始化代码
     atrHandle = iATR(_Symbol, PERIOD_H1, 14);
-    atrHandle = iATR(_Symbol, PERIOD_H1, 14);
     bandsHandle = iBands(_Symbol, PERIOD_H1, 20, 0, 2.0, PRICE_CLOSE);
     openTime = TimeCurrent() + orderTime;
     UpdateEAStatus();
-    
+
     // Setup UI
     CreateGUI();
     UpdateGUI();
-    
+
+    EventSetTimer(3);  // poll config + reload trigger every 3s
+
     printfPro("重新载入");
     return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Timer: poll config.set and reload.trigger                        |
+//+------------------------------------------------------------------+
+void OnTimer()
+  {
+    if (ReloadRuntimeConfig(false)){
+       DumpInputsRuntime();
+       UpdateEAStatus();
+       UpdateGUI();
+       printfPro("参数已热更新");
+    }
+    if (CheckReloadTrigger()){
+       printfPro("Reload trigger detected: forcing chart reinit");
+       ChartSetSymbolPeriod(0, _Symbol, _Period);
+    }
   }
 
 //+------------------------------------------------------------------+
@@ -921,7 +1140,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
-    // 清理代码
+    EventKillTimer();
     if (atrHandle != INVALID_HANDLE){
        IndicatorRelease(atrHandle);
        atrHandle = INVALID_HANDLE;
@@ -930,7 +1149,7 @@ void OnDeinit(const int reason)
        IndicatorRelease(bandsHandle);
        bandsHandle = INVALID_HANDLE;
     }
-    
+
     ObjectsDeleteAll(0, UI_PREFIX);
   }
 
@@ -1962,8 +2181,8 @@ bool IsNewsTime(string &newsTitle) {
    if(!newsFilterEnabled) return false;
    
    datetime now = TimeCurrent();
-   datetime start = now - InpNewsAfterMinutes * 60;
-   datetime end = now + InpNewsBeforeMinutes * 60;
+   datetime start = now - newsAfterMinutes * 60;
+   datetime end = now + newsBeforeMinutes * 60;
    
    MqlCalendarValue values[];
    
@@ -1973,8 +2192,8 @@ bool IsNewsTime(string &newsTitle) {
          if(CalendarEventById(values[i].event_id, event)) {
              
              bool importanceMatch = false;
-             if(InpNewsHighImportance && event.importance == CALENDAR_IMPORTANCE_HIGH) importanceMatch = true;
-             if(InpNewsMediumImportance && event.importance == CALENDAR_IMPORTANCE_MODERATE) importanceMatch = true;
+             if(newsHighImportance && event.importance == CALENDAR_IMPORTANCE_HIGH) importanceMatch = true;
+             if(newsMediumImportance && event.importance == CALENDAR_IMPORTANCE_MODERATE) importanceMatch = true;
              
              if(!importanceMatch) continue;
              

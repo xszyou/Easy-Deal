@@ -107,7 +107,7 @@ class TradingContext:
         profile_path = os.getenv("EA_PROFILE_PATH")
         self.profile_path = profile_path if profile_path else "monitor_profile.json"
         self.profile = {}
-        self.symbols = ["XAUUSDm", "XAUUSDc", "XAUUSD"]
+        self.symbols = ["GOLD", "GOLD#", "XAUUSDm", "XAUUSDc", "XAUUSD"]
         self.symbol = self.symbols[0]
         self.magic_numbers = [999]
         self.magic_number = self.magic_numbers[0]
@@ -119,6 +119,23 @@ class TradingContext:
             base_dir = os.path.dirname(os.path.abspath(__file__))
             self.set_path = os.path.abspath(os.path.join(base_dir, "..", "config.set"))
         self.set_parameters = {}
+
+        # 设置有效期（可选）
+        self.expiry_date = None
+        self.running = True
+
+        # 运行状态
+        self.is_open_position = False
+
+        # Initialize MT5 connection — must happen before loading set/profile
+        # so that mt5.terminal_info() and mt5.symbol_info() are available
+        if not mt5.initialize():
+            logging.error("MT5初始化失败")
+            print("MT5初始化失败")
+            self.running = False
+            return
+
+        # 加载 set 文件（需要 MT5 已初始化，fallback 依赖 terminal_info）
         set_ok, set_msg = self.load_set_file(self.set_path)
         if not set_ok:
             logging.warning(f"Set file load failed: {set_msg}")
@@ -142,39 +159,26 @@ class TradingContext:
                 except Exception as exc:
                     logging.warning(f"EA source param fallback failed: {exc}")
 
-        # 设置有效期（可选）
-        self.expiry_date = None
-        self.running = True
+        ok, msg = self.load_profile(self.profile_path)
+        if not ok:
+            logging.warning(f"配置文件加载失败: {msg}")
 
-        # 运行状态
-        self.is_open_position = False
+        env_ok, env_msg = self.apply_env_profile()
+        if env_ok:
+            logging.info(f"已应用环境变量配置: {env_msg}")
+        elif env_msg != "未设置环境变量配置":
+            logging.warning(f"环境变量配置无效: {env_msg}")
 
-        # Initialize MT5 connection
-        if not mt5.initialize():
-            logging.error("MT5初始化失败")
-            print("MT5初始化失败")
+        # 验证币对是否存在
+        symbol_info = mt5.symbol_info(self.symbol)
+        if symbol_info is None:
+            logging.error(f"错误: MT5中不存在币对 {self.symbol}")
+            print(f"错误: MT5中不存在币对 {self.symbol}")
             self.running = False
-        else:
-            ok, msg = self.load_profile(self.profile_path)
-            if not ok:
-                logging.warning(f"配置文件加载失败: {msg}")
+            return
 
-            env_ok, env_msg = self.apply_env_profile()
-            if env_ok:
-                logging.info(f"已应用环境变量配置: {env_msg}")
-            elif env_msg != "未设置环境变量配置":
-                logging.warning(f"环境变量配置无效: {env_msg}")
-
-            # 验证币对是否存在
-            symbol_info = mt5.symbol_info(self.symbol)
-            if symbol_info is None:
-                logging.error(f"错误: MT5中不存在币对 {self.symbol}")
-                print(f"错误: MT5中不存在币对 {self.symbol}")
-                self.running = False
-                return
-
-            self.refresh_position_state()
-            logging.info(f"载入交易上下文，交易币对: {self.symbol}")
+        self.refresh_position_state()
+        logging.info(f"载入交易上下文，交易币对: {self.symbol}")
 
     def get_config_info(self):
         """获取配置信息"""
@@ -354,7 +358,7 @@ class TradingContext:
     def apply_env_profile(self) -> tuple[bool, str]:
         profile = {}
 
-        symbols_env = os.getenv("EA_SYMBOLS", "XAUUSD,XAUUSDm,XAUUSDc")
+        symbols_env = os.getenv("EA_SYMBOLS", "GOLD,GOLD#,XAUUSD,XAUUSDm,XAUUSDc")
         profile["symbols"] = self._split_env_list(symbols_env)
 
         magics_env = os.getenv("EA_MAGIC_NUMBERS")
@@ -994,7 +998,8 @@ class TradingMonitor:
             "event_type": event_type,
             "level": level,
             "message": message,
-            "data": data or {}
+            "data": data or {},
+            "alert_key": alert_key,
         }
 
         monitor_logger.log(
@@ -1460,7 +1465,14 @@ class FileCallback:
 
 
 class AgentCallback:
-    """Agent 终端回调"""
+    """Agent 终端回调
+
+    - danger / critical → 透传给 Fay，触发对话回复
+    - info / warning    → 记录为 Fay 观察记忆，不触发回复
+    """
+
+    # 需要透传（触发 Fay 回复）的级别
+    PASSTHROUGH_LEVELS = {"danger", "critical"}
 
     def __init__(self, url: str = "http://127.0.0.1:5000/transparent-pass",
                  api_key: str = "YOUR_API_KEY",
@@ -1475,39 +1487,62 @@ class AgentCallback:
         self.cooldown = cooldown
         self.user = user
         self.last_alert_time = {}
+        # 从透传 URL 推导 Fay 基地址（用于观察记忆接口）
+        self.fay_base_url = url.rsplit("/", 1)[0] if "/" in url else url
 
     def __call__(self, event: dict):
-        alert_key = f"{event['event_type']}:{event['level']}"
+        # 优先使用 notify 传入的细粒度 alert_key（如 order_change:open:12345）
+        alert_key = event.get("alert_key") or f"{event['event_type']}:{event['level']}"
         now = time.time()
         if alert_key in self.last_alert_time:
             if now - self.last_alert_time[alert_key] < self.cooldown:
                 return
         self.last_alert_time[alert_key] = now
 
-        try:
-            level_emoji = {"info": "ℹ️", "warning": "⚠️", "danger": "🚨", "critical": "🆘"}
-            emoji = level_emoji.get(event["level"], "📢")
+        level = event.get("level", "info")
+        level_emoji = {"info": "ℹ️", "warning": "⚠️", "danger": "🚨", "critical": "🆘"}
+        emoji = level_emoji.get(level, "📢")
 
-            prompt = f"""{emoji} 交易预警通知
+        text = f"""{emoji} 交易预警通知
 
 类型: {event['event_type']}
-级别: {event['level'].upper()}
+级别: {level.upper()}
 时间: {event['timestamp']}
 消息: {event['message']}
 数据: {json.dumps(event.get('data', {}), ensure_ascii=False)}"""
 
+        if level in self.PASSTHROUGH_LEVELS:
+            self._send_passthrough(text)
+        else:
+            self._send_observation(text)
+
+    def _send_passthrough(self, text: str):
+        """重要告警 → 透传给 Fay，触发对话回复"""
+        try:
+            payload = {"user": self.user, "text": text}
+            response = requests.post(self.url, json=payload, timeout=10)
+            if response.status_code != 200:
+                monitor_logger.error(f"Agent透传失败，状态码：{response.status_code}")
+        except Exception as e:
+            monitor_logger.error(f"Agent透传执行失败: {e}")
+
+    def _send_observation(self, text: str):
+        """一般告警 → 记录为 Fay 观察记忆，不触发回复"""
+        try:
+            obs_url = f"{self.fay_base_url}/api/send"
             payload = {
                 "user": self.user,
-                "text": prompt,
+                "content": text,
+                "observation": text,
+                "no_reply": True,
             }
-
-            response = requests.post(self.url, json=payload, timeout=10)
-
+            response = requests.post(obs_url, json=payload, timeout=10)
             if response.status_code != 200:
-                monitor_logger.error(f"Agent回调失败，状态码：{response.status_code}")
-
+                monitor_logger.error(f"Agent观察记录失败，状态码：{response.status_code}")
+            else:
+                monitor_logger.info(f"告警已记录为观察记忆: {text[:80]}")
         except Exception as e:
-            monitor_logger.error(f"Agent回调执行失败: {e}")
+            monitor_logger.error(f"Agent观察记录失败: {e}")
 
 
 # ============== Flask API 路由 ==============
@@ -1530,8 +1565,32 @@ def log_request():
 
 
 
+class _BannerSuppressor:
+    """包装 stdout，过滤 Werkzeug/Flask 启动横幅，避免污染 MCP stdio 通道。"""
+    _BANNER_KEYWORDS = ("Serving Flask", "Debug mode", "Running on", "Restarting with", "Debugger is")
+
+    def __init__(self, real):
+        self._real = real
+
+    def write(self, s):
+        stripped = s.strip()
+        if stripped.startswith("*") and any(kw in stripped for kw in self._BANNER_KEYWORDS):
+            return len(s)
+        return self._real.write(s)
+
+    def flush(self):
+        self._real.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 def run_flask():
-    """运行Flask服务器"""
+    """运行Flask服务器（静默启动，避免污染 MCP stdio 通道）"""
+    import sys
+    werkzeug_log = logging.getLogger("werkzeug")
+    werkzeug_log.setLevel(logging.WARNING)
+    sys.stdout = _BannerSuppressor(sys.stdout)
     app.run(host='0.0.0.0', port=8888, debug=False, use_reloader=False)
 
 
@@ -2384,17 +2443,16 @@ def _parse_input_params(content: str) -> list[dict]:
     return params
 
 
-def _load_params_from_chart_profiles(ea_name: str = None) -> dict | None:
-    """Search MT5 chart profiles (.chr) for the running EA's actual input parameters.
+def _load_params_from_runtime_json(ea_name: str = None) -> dict | None:
+    """Read EA-dumped runtime parameters from MQL5/Files/<EA>_runtime.json.
 
-    MT5 saves chart config in {data_path}/MQL5/Profiles/Charts/<profile>/<chartNN>.chr.
-    EA inputs appear between <inputs> and </inputs> tags inside an <expert> block.
-    Returns dict of {param_name: value} or None if not found.
+    The EA's OnInit writes this file, so it always reflects the true current
+    input values (unlike .chr which MT5 only flushes on save/close).
+    Returns {param_name: value_as_string} or None if file missing/invalid.
     """
     if ea_name is None:
         ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
-    # Derive the compiled .ex5 name that appears in .chr files
-    ea_ex5 = os.path.splitext(ea_name)[0] + ".ex5"
+    ea_base = os.path.splitext(ea_name)[0]
 
     try:
         info = mt5.terminal_info()
@@ -2403,31 +2461,183 @@ def _load_params_from_chart_profiles(ea_name: str = None) -> dict | None:
     except Exception:
         return None
 
-    charts_dir = os.path.join(info.data_path, "MQL5", "Profiles", "Charts")
-    if not os.path.isdir(charts_dir):
+    runtime_path = os.path.join(info.data_path, "MQL5", "Files", f"{ea_base}_runtime.json")
+    if not os.path.isfile(runtime_path):
         return None
 
-    # Walk all profile subdirs looking for .chr files that reference our EA
+    try:
+        with open(runtime_path, "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+    except Exception as exc:
+        logging.warning(f"runtime json parse failed ({runtime_path}): {exc}")
+        return None
+
+    params_raw = data.get("params")
+    if not isinstance(params_raw, dict):
+        return None
+
+    # Normalize all values to strings to match .chr output shape
+    return {k: ("true" if v is True else "false" if v is False else str(v))
+            for k, v in params_raw.items()}
+
+
+def _get_runtime_json_info(ea_name: str = None) -> dict | None:
+    """Return metadata about the runtime JSON file for diagnostics."""
+    if ea_name is None:
+        ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+    ea_base = os.path.splitext(ea_name)[0]
+
+    try:
+        info = mt5.terminal_info()
+        if not info or not info.data_path:
+            return None
+    except Exception:
+        return None
+
+    runtime_path = os.path.join(info.data_path, "MQL5", "Files", f"{ea_base}_runtime.json")
+    result = {"path": runtime_path, "exists": os.path.isfile(runtime_path)}
+    if result["exists"]:
+        try:
+            result["mtime"] = datetime.fromtimestamp(
+                os.path.getmtime(runtime_path)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+            with open(runtime_path, "r", encoding="utf-8", errors="replace") as f:
+                result["content"] = json.load(f)
+        except Exception as exc:
+            result["read_error"] = str(exc)
+    return result
+
+
+def _get_config_set_path(ea_name: str = None) -> str | None:
+    """Return path to MQL5/Files/<EA>_config.set (MCP-written runtime overrides)."""
+    if ea_name is None:
+        ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+    ea_base = os.path.splitext(ea_name)[0]
+    data_path = _get_mt5_data_path()
+    if not data_path:
+        return None
+    return os.path.join(data_path, "MQL5", "Files", f"{ea_base}_config.set")
+
+
+def _load_params_from_config_set(ea_name: str = None) -> dict | None:
+    """Parse <EA>_config.set. Returns {param_name: value_str} or None."""
+    path = _get_config_set_path(ea_name)
+    if not path or not os.path.isfile(path):
+        return None
+    params: dict = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#") or s.startswith(";") or "=" not in s:
+                    continue
+                k, v = s.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if not k or k == "ts":
+                    continue
+                params[k] = v
+    except Exception as exc:
+        logging.warning(f"config.set parse failed ({path}): {exc}")
+        return None
+    return params or None
+
+
+def _get_config_set_info(ea_name: str = None) -> dict | None:
+    """Diagnostic snapshot of the config.set file."""
+    path = _get_config_set_path(ea_name)
+    if not path:
+        return None
+    result = {"path": path, "exists": os.path.isfile(path)}
+    if result["exists"]:
+        try:
+            result["mtime"] = datetime.fromtimestamp(
+                os.path.getmtime(path)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                result["content"] = f.read()
+        except Exception as exc:
+            result["read_error"] = str(exc)
+    return result
+
+
+def _touch_reload_trigger(ea_name: str = None) -> dict:
+    """Write current epoch to MQL5/Files/<EA>_reload.trigger so EA's OnTimer
+    detects the bump and calls ChartSetSymbolPeriod to force reinit."""
+    if ea_name is None:
+        ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+    ea_base = os.path.splitext(ea_name)[0]
+    data_path = _get_mt5_data_path()
+    if not data_path:
+        return {"ok": False, "error": "MT5 data_path unavailable"}
+    trigger_path = os.path.join(data_path, "MQL5", "Files", f"{ea_base}_reload.trigger")
+    try:
+        os.makedirs(os.path.dirname(trigger_path), exist_ok=True)
+        ts = int(time.time())
+        with open(trigger_path, "w", encoding="ascii") as f:
+            f.write(str(ts))
+        return {"ok": True, "path": trigger_path, "ts": ts}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "path": trigger_path}
+
+
+def _normalize_param_value(param_type: str, value: str) -> str:
+    """Coerce new_value string to canonical representation based on MQL5 input type.
+    Raises ValueError if value is malformed for the declared type."""
+    v = (value or "").strip()
+    t = (param_type or "").lower()
+    if t == "bool":
+        low = v.lower()
+        if low in ("true", "1", "yes", "on"):
+            return "true"
+        if low in ("false", "0", "no", "off"):
+            return "false"
+        raise ValueError(f"bool param requires true/false, got '{value}'")
+    if t in ("int", "long", "short", "uint", "ulong", "uchar", "char"):
+        return str(int(v))
+    if t in ("double", "float"):
+        return str(float(v))
+    return v
+
+
+def _scan_chart_profiles_for_ea(ea_name: str = None) -> list[dict]:
+    """Scan all .chr files that reference the given EA.
+
+    Returns a list of {path, mtime, params} sorted by mtime descending (newest first).
+    Used by both _load_params_from_chart_profiles (uses [0]) and diagnostics.
+    """
+    if ea_name is None:
+        ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+    ea_ex5 = os.path.splitext(ea_name)[0] + ".ex5"
+
+    try:
+        info = mt5.terminal_info()
+        if not info or not info.data_path:
+            return []
+    except Exception:
+        return []
+
+    charts_dir = os.path.join(info.data_path, "MQL5", "Profiles", "Charts")
+    if not os.path.isdir(charts_dir):
+        return []
+
+    found = []
     for root, _dirs, files in os.walk(charts_dir):
         for fname in files:
             if not fname.lower().endswith(".chr"):
                 continue
             chr_path = os.path.join(root, fname)
-            try:
-                with open(chr_path, "r", encoding="utf-16-le", errors="replace") as f:
-                    content = f.read()
-            except Exception:
+            content = None
+            for enc in ("utf-16-le", "utf-16", "utf-8"):
                 try:
-                    with open(chr_path, "r", encoding="utf-8", errors="replace") as f:
+                    with open(chr_path, "r", encoding=enc, errors="replace") as f:
                         content = f.read()
+                    break
                 except Exception:
                     continue
-
-            # Check if this chart has our EA
-            if ea_ex5.lower() not in content.lower():
+            if content is None or ea_ex5.lower() not in content.lower():
                 continue
 
-            # Extract <inputs> ... </inputs> block
             inputs_match = re.search(
                 r'<inputs>\s*\n(.*?)\n\s*</inputs>',
                 content, re.DOTALL | re.IGNORECASE
@@ -2445,11 +2655,40 @@ def _load_params_from_chart_profiles(ea_name: str = None) -> dict | None:
                 value = value.strip()
                 if key:
                     params[key] = value
-            if params:
-                logging.info(f"Loaded {len(params)} EA params from chart profile: {chr_path}")
-                return params
+            if not params:
+                continue
 
-    return None
+            try:
+                mtime = os.path.getmtime(chr_path)
+            except OSError:
+                mtime = 0.0
+            found.append({"path": chr_path, "mtime": mtime, "params": params})
+
+    found.sort(key=lambda x: x["mtime"], reverse=True)
+    return found
+
+
+def _load_params_from_chart_profiles(ea_name: str = None) -> dict | None:
+    """Return EA input params, preferring EA-dumped runtime JSON over .chr.
+
+    Resolution order:
+    1. MQL5/Files/<EA>_runtime.json (written by EA OnInit — always current)
+    2. Newest .chr file under MQL5/Profiles/Charts (can be stale)
+    """
+    runtime = _load_params_from_runtime_json(ea_name)
+    if runtime:
+        logging.info(f"Loaded {len(runtime)} EA params from runtime JSON")
+        return runtime
+
+    candidates = _scan_chart_profiles_for_ea(ea_name)
+    if not candidates:
+        return None
+    picked = candidates[0]
+    logging.info(
+        f"Loaded {len(picked['params'])} EA params from chart profile: {picked['path']} "
+        f"(mtime={datetime.fromtimestamp(picked['mtime']).strftime('%Y-%m-%d %H:%M:%S')})"
+    )
+    return picked["params"]
 
 
 def _get_mt5_data_path() -> str | None:
@@ -2649,28 +2888,21 @@ def _backup_strategy(change_note: str = "") -> str:
 
 
 def _get_metaeditor_path() -> str:
-    """Get MetaEditor64.exe path.
+    """Get MetaEditor64.exe path from MT5 itself.
 
     Resolution order:
-    1. METAEDITOR_PATH env var
-    2. Auto-detect from MT5 terminal_info().path (same dir as terminal64.exe)
-    3. Fallback default
+    1. METAEDITOR_PATH env var (manual override)
+    2. mt5.terminal_info().path (MT5 installation directory, reported by MT5)
     """
     env_path = os.getenv("METAEDITOR_PATH")
     if env_path and os.path.isfile(env_path):
         return env_path
 
-    # Auto-detect: MetaEditor64.exe is in the same directory as terminal64.exe
-    try:
-        info = mt5.terminal_info()
-        if info and info.path:
-            me_path = os.path.join(os.path.dirname(info.path), "MetaEditor64.exe")
-            if os.path.isfile(me_path):
-                return me_path
-    except Exception:
-        pass
+    info = mt5.terminal_info()
+    if info and info.path:
+        return os.path.join(info.path, "MetaEditor64.exe")
 
-    return r"C:\Program Files\MetaTrader 5\MetaEditor64.exe"
+    return ""
 
 
 # ============== MCP 工具定义 ==============
@@ -2737,7 +2969,7 @@ def get_all_tools() -> list[Tool]:
         ),
         Tool(
             name="get_ea_logs",
-            description="获取 EA 策略的 Print() 输出日志（交易决策、开平仓、马丁触发等）。从 MT5 数据目录 MQL5/Logs/ 读取，倒序分页（page=1 最新）。",
+            description="获取 EA 策略的 Print() 输出日志（交易决策、开平仓、策略触发事件等）。从 MT5 数据目录 MQL5/Logs/ 读取，倒序分页（page=1 最新）。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2766,12 +2998,12 @@ def get_all_tools() -> list[Tool]:
         ),
         Tool(
             name="get_trading_status",
-            description="Get current account, positions, and market snapshot.",
+            description="查看当前盘面情况：账户余额/净值、持仓订单明细、市场行情快照（价格/点差）、策略状态。用于回答『盘面怎么样』『持仓情况』『账户状态』等问题。",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
         Tool(
             name="get_market_info",
-            description="Get current market info for the configured symbol.",
+            description="获取当前交易品种的实时行情数据：买卖价、点差、涨跌幅、波动率等。用于回答『行情如何』『价格多少』『市场波动』等问题。",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
         Tool(
@@ -2807,7 +3039,7 @@ def get_all_tools() -> list[Tool]:
         # ---------- Strategy script improvement tools ----------
         Tool(
             name="read_strategy_source",
-            description="读取 GMarket.mq5 策略源码（带行号）。可指定行范围以减少输出量。",
+            description="读取当前 EA 策略源码（.mq5，带行号）。EA 文件名按 EA_FILENAME/EA_FILE_PATH 环境变量或 .chr 自动检测决定。可指定行范围以减少输出量。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2819,24 +3051,28 @@ def get_all_tools() -> list[Tool]:
         ),
         Tool(
             name="get_strategy_params",
-            description="解析 GMarket.mq5 中所有 input 参数，返回参数名、类型、当前值和注释。",
+            description="获取 EA 所有 input 参数的完整视图：同时返回 EA 运行时实际值(runtime_json, EA OnInit 写入, 最准)、.chr 文件值、.set 文件值、源码默认值，并标注当前生效值(effective_value)。参数读不准时首选此工具。",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
         Tool(
             name="update_strategy_param",
-            description="修改 GMarket.mq5 中指定 input 参数的值。修改前自动备份。",
+            description=(
+                "热更新 EA 运行时参数：向 MQL5/Files/<EA>_config.set 写入 k=v 覆盖项（<EA> 为当前加载的 EA 基名）。"
+                "需要 EA 自身实现轮询逻辑（推荐 OnTimer 周期性检查 mtime 变化并应用覆盖，同步刷新 <EA>_runtime.json），"
+                "满足此契约的 EA 无需重编译、无需重挂图表。param_name 必须是 EA 源码中 input 声明的变量名。"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "param_name": {"type": "string", "description": "参数名（如 firstLots, step 等）"},
-                    "new_value": {"type": "string", "description": "新值（字符串形式，如 \"0.02\", \"true\"）"}
+                    "param_name": {"type": "string", "description": "input 变量名（如 InpFirstLots, InpStep, InpIsPaused）"},
+                    "new_value": {"type": "string", "description": "新值（字符串形式，如 \"0.02\", \"true\", \"5\"）"}
                 },
                 "required": ["param_name", "new_value"]
             }
         ),
         Tool(
             name="patch_strategy_code",
-            description="在 GMarket.mq5 中搜索替换代码。confirm=false 仅预览匹配，confirm=true 执行替换（自动备份）。",
+            description="在当前 EA 的 .mq5 源码中搜索替换代码。confirm=false 仅预览匹配，confirm=true 执行替换（自动备份）。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2849,7 +3085,14 @@ def get_all_tools() -> list[Tool]:
         ),
         Tool(
             name="compile_strategy",
-            description="使用 MetaEditor64 编译当前 EA，返回编译结果和错误信息。MetaEditor 从 MT5 安装目录自动检测。",
+            description=(
+                "【开发期编译工具 · 非查询工具】调用 MetaEditor64 对当前 EA 的 .mq5 源代码做语法编译，"
+                "返回编译器 stderr/stdout。仅在『修改策略代码后需要重新编译』这一场景下使用。"
+                "禁止用于：查看行情/价格/点差/K线 → 请改用 get_market_info；"
+                "查看账户/持仓/订单/盘面状态 → 请改用 get_trading_status；"
+                "查看策略运行/信号 → 请改用 get_strategy_status。"
+                "此工具无任何查询能力，调用它不会得到市场数据。"
+            ),
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
         Tool(
@@ -2875,6 +3118,11 @@ def get_all_tools() -> list[Tool]:
                 },
                 "required": []
             }
+        ),
+        Tool(
+            name="diagnose_params_sources",
+            description="诊断 EA 参数各来源的实际状态：列出所有含 EA 的 .chr 文件（路径+修改时间+参数），.set 文件路径及内容，源码默认值。当 get_strategy_params 读到的值和 MT5 图表上显示的不一致时，用此工具排查。",
+            inputSchema={"type": "object", "properties": {}, "required": []}
         ),
     ]
 
@@ -2997,42 +3245,164 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             filepath = _get_strategy_file_path()
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
-            params = _parse_input_params(content)
-            result = {"file": filepath, "param_count": len(params), "params": params}
+            source_params = _parse_input_params(content)
+
+            runtime_params = _load_params_from_runtime_json() or {}
+            chart_params = {} if runtime_params else (_scan_chart_profiles_for_ea() or [{}])[0].get("params", {})
+            runtime_from = "runtime_json" if runtime_params else ("chart_profile" if chart_params else None)
+            runtime_params = runtime_params or chart_params
+
+            config_params = _load_params_from_config_set() or {}
+
+            set_params: dict = {}
+            set_path = None
+            try:
+                set_path = get_strategy().set_path
+            except RuntimeError:
+                pass
+            if set_path and set_path.lower().endswith(".set") and os.path.isfile(set_path):
+                try:
+                    with open(set_path, "r", encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            s = line.strip()
+                            if not s or s.startswith(";") or s.startswith("#") or "=" not in s:
+                                continue
+                            k, v = s.split("=", 1)
+                            v = v.split("||", 1)[0].strip() if "||" in v else v.strip()
+                            if k.strip():
+                                set_params[k.strip()] = v
+                except Exception as exc:
+                    logging.warning(f"Re-read .set file failed: {exc}")
+
+            merged = []
+            for p in source_params:
+                pname = p["name"]
+                source_val = p["value"]
+                runtime_val = runtime_params.get(pname)
+                config_val = config_params.get(pname)
+                set_val = set_params.get(pname)
+
+                if runtime_val is not None:
+                    effective = str(runtime_val)
+                    source_tag = runtime_from  # "runtime_json" or "chart_profile"
+                elif config_val is not None:
+                    effective = str(config_val)
+                    source_tag = "config_set"
+                elif set_val is not None:
+                    effective = str(set_val)
+                    source_tag = "set_file"
+                else:
+                    effective = source_val
+                    source_tag = "source_default"
+
+                merged.append({
+                    "name": pname,
+                    "type": p["type"],
+                    "comment": p["comment"],
+                    "effective_value": effective,
+                    "effective_from": source_tag,
+                    "source_default": source_val,
+                    "runtime_value": str(runtime_val) if runtime_val is not None else None,
+                    "config_set_value": str(config_val) if config_val is not None else None,
+                    "set_file_value": str(set_val) if set_val is not None else None,
+                })
+
+            result = {
+                "file": filepath,
+                "param_count": len(merged),
+                "runtime_source": runtime_from,
+                "config_set_file": _get_config_set_path(),
+                "config_set_overrides": len(config_params),
+                "set_file": set_path,
+                "params": merged,
+                "note": (
+                    "effective_value 优先级: runtime_json (EA 实际运行值, 最准) > config_set (MCP 写入的热更新覆盖) > set_file > source_default。"
+                    "用 update_strategy_param 写入 config_set 即可热更新，EA 3 秒内会自动应用。"
+                ),
+            }
             return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         if name == "update_strategy_param":
             param_name = arguments["param_name"]
-            new_value = arguments["new_value"]
+            new_value = str(arguments["new_value"])
+
             filepath = _get_strategy_file_path()
-
             with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
+                source_params = _parse_input_params(f.read())
+            by_name = {p["name"]: p for p in source_params}
+            if param_name not in by_name:
+                return [TextContent(type="text", text=json.dumps({
+                    "error": f"Unknown param '{param_name}'",
+                    "known_params": list(by_name.keys()),
+                }, ensure_ascii=False))]
 
-            # Match the input line for this param
-            pattern = re.compile(
-                r'^(input\s+\w+\s+' + re.escape(param_name) + r'\s*=\s*)([^;]+)(;.*)$',
-                re.MULTILINE
-            )
-            m = pattern.search(content)
-            if not m:
+            try:
+                normalized = _normalize_param_value(by_name[param_name]["type"], new_value)
+            except ValueError as exc:
+                return [TextContent(type="text", text=json.dumps({"error": str(exc)}, ensure_ascii=False))]
+
+            cfg_path = _get_config_set_path()
+            if not cfg_path:
                 return [TextContent(type="text", text=json.dumps(
-                    {"error": f"Parameter '{param_name}' not found in strategy file"}, ensure_ascii=False))]
+                    {"error": "MT5 data_path unavailable — cannot locate MQL5/Files directory."},
+                    ensure_ascii=False))]
 
-            old_value = m.group(2).strip()
-            backup_path = _backup_strategy(change_note=f"update param {param_name}: {old_value} -> {new_value}")
-            new_content = pattern.sub(rf'\g<1>{new_value} \3', content)
+            # Preserve existing entries and their order.
+            entries: dict = {}
+            order: list = []
+            if os.path.isfile(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            s = line.strip()
+                            if not s or s.startswith("#") or s.startswith(";") or "=" not in s:
+                                continue
+                            k, v = s.split("=", 1)
+                            k = k.strip(); v = v.strip()
+                            if not k or k == "ts":
+                                continue
+                            if k not in entries:
+                                order.append(k)
+                            entries[k] = v
+                except Exception as exc:
+                    logging.warning(f"config.set read failed before update ({cfg_path}): {exc}")
 
-            with open(filepath, "w", encoding="utf-8") as f:
+            old_value_in_config = entries.get(param_name)
+            entries[param_name] = normalized
+            if param_name not in order:
+                order.append(param_name)
+
+            ts_epoch = int(time.time())
+            human_ts = datetime.fromtimestamp(ts_epoch).strftime("%Y-%m-%d %H:%M:%S")
+            out_lines = [
+                f"# GMarket runtime overrides — written by easydeal_mcp at {human_ts}",
+                "# EA OnTimer reloads this file when mtime advances (no recompile needed).",
+                f"ts={ts_epoch}",
+            ]
+            for k in order:
+                out_lines.append(f"{k}={entries[k]}")
+            new_content = "\n".join(out_lines) + "\n"
+
+            os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+            tmp_path = cfg_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(new_content)
+            os.replace(tmp_path, cfg_path)
 
             result = {
+                "ok": True,
                 "param": param_name,
-                "old_value": old_value,
-                "new_value": new_value,
-                "backup": os.path.basename(backup_path)
+                "type": by_name[param_name]["type"],
+                "new_value": normalized,
+                "old_value_in_config": old_value_in_config,
+                "source_default": by_name[param_name]["value"],
+                "config_file": cfg_path,
+                "note": (
+                    "已写入 config.set。EA 每 3 秒轮询该文件，检测到 mtime 变化即自动覆盖对应 runtime 变量并刷新 runtime.json；"
+                    "不修改源码、无需重编译或重挂 EA。要回退为源码默认值：把该 param 改回 source_default 即可。"
+                ),
             }
-            logging.info(f"Strategy param updated: {param_name} = {old_value} -> {new_value}")
+            logging.info(f"Runtime override written: {param_name} = {normalized} (prev={old_value_in_config})")
             return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         if name == "patch_strategy_code":
@@ -3083,50 +3453,276 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             filepath = _get_strategy_file_path()
             metaeditor = _get_metaeditor_path()
 
-            if not os.path.isfile(metaeditor):
+            if not metaeditor or not os.path.isfile(metaeditor):
                 return [TextContent(type="text", text=json.dumps(
-                    {"error": f"MetaEditor64 not found at: {metaeditor}. "
-                              "MetaEditor64.exe should be in the same directory as your MT5 terminal. "
-                              "You can also set METAEDITOR_PATH environment variable."},
+                    {"error": f"MetaEditor64 not found: '{metaeditor}'. "
+                              "Ensure MT5 is initialized, or set METAEDITOR_PATH env var."},
                     ensure_ascii=False))]
 
-            # Build compile command with include path
-            compile_args = [metaeditor, f"/compile:{filepath}"]
+            # Pick a writable log location. Prefer MT5 data_path/MQL5/Logs
+            # (MetaEditor writes its own logs there, so permission is guaranteed);
+            # fall back to system temp.
             data_path = _get_mt5_data_path()
+            if data_path and os.path.isdir(os.path.join(data_path, "MQL5", "Logs")):
+                log_dir = os.path.join(data_path, "MQL5", "Logs")
+            else:
+                import tempfile
+                log_dir = tempfile.gettempdir()
+            log_file_path = os.path.join(
+                log_dir,
+                f"{os.path.basename(filepath)}.mcp_compile_{int(time.time())}.log"
+            )
+            # Ensure no stale log from previous run
+            if os.path.isfile(log_file_path):
+                try:
+                    os.remove(log_file_path)
+                except OSError:
+                    pass
+
+            # Build the command line as a string so the flag syntax matches
+            # MetaEditor's expectation: `/compile:"<path>"` with the QUOTES
+            # around the path only, not around the whole flag.
+            include_part = ""
             if data_path:
                 include_path = os.path.join(data_path, "MQL5")
-                compile_args.append(f"/include:{include_path}")
+                include_part = f' /include:"{include_path}"'
+            cmd_str = (
+                f'"{metaeditor}"'
+                f' /compile:"{filepath}"'
+                f'{include_part}'
+                f' /log:"{log_file_path}"'
+            )
 
-            log_file_path = filepath + ".compile.log"
-            compile_args.append(f"/log:{log_file_path}")
+            # Detect pre-existing MetaEditor instances using full tasklist path.
+            preexisting_instances = -1
+            tasklist_exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                                         "System32", "tasklist.exe")
+            tasklist_err = None
+            if os.path.isfile(tasklist_exe):
+                try:
+                    tl = subprocess.run(
+                        [tasklist_exe, "/FI", "IMAGENAME eq MetaEditor64.exe", "/NH"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    preexisting_instances = sum(
+                        1 for line in (tl.stdout or "").splitlines()
+                        if "MetaEditor64.exe" in line
+                    )
+                except Exception as exc:
+                    tasklist_err = str(exc)
+            else:
+                tasklist_err = f"tasklist.exe not found at {tasklist_exe}"
+
+            # Capture .ex5 mtime before compile to detect whether MetaEditor actually rebuilt.
+            ex5_path = os.path.splitext(filepath)[0] + ".ex5"
+            ex5_mtime_before = os.path.getmtime(ex5_path) if os.path.isfile(ex5_path) else None
+
             try:
                 proc = subprocess.run(
-                    compile_args,
-                    capture_output=True, text=True, timeout=60
+                    cmd_str,
+                    capture_output=True, text=True, timeout=120,
+                    cwd=os.path.dirname(metaeditor),  # MetaEditor install dir, not EA's
+                    shell=False
                 )
             except subprocess.TimeoutExpired:
                 return [TextContent(type="text", text=json.dumps(
-                    {"error": "Compilation timed out (60s)"}, ensure_ascii=False))]
+                    {"error": "Compilation timed out (120s)"}, ensure_ascii=False))]
 
-            # Read compile log
+            # Poll for up to 30s for async completion (in case another MetaEditor
+            # instance handled it and writes log/ex5 after our subprocess exits).
+            poll_deadline = time.time() + 30
+            while time.time() < poll_deadline:
+                if os.path.isfile(log_file_path):
+                    break
+                cur_mtime = os.path.getmtime(ex5_path) if os.path.isfile(ex5_path) else None
+                if cur_mtime is not None and (ex5_mtime_before is None or cur_mtime > ex5_mtime_before):
+                    break
+                time.sleep(0.5)
+
+            ex5_mtime_after = os.path.getmtime(ex5_path) if os.path.isfile(ex5_path) else None
+            ex5_rebuilt = (
+                ex5_mtime_after is not None
+                and (ex5_mtime_before is None or ex5_mtime_after > ex5_mtime_before)
+            )
+
+            # Read compile log with BOM-based encoding detection
             compile_log = ""
+            log_read_error = None
             if os.path.isfile(log_file_path):
-                with open(log_file_path, "r", encoding="utf-16-le", errors="replace") as f:
-                    compile_log = f.read()
+                try:
+                    with open(log_file_path, "rb") as f:
+                        raw = f.read()
+                    if raw.startswith(b"\xff\xfe"):
+                        compile_log = raw[2:].decode("utf-16-le", errors="replace")
+                    elif raw.startswith(b"\xfe\xff"):
+                        compile_log = raw[2:].decode("utf-16-be", errors="replace")
+                    elif raw.startswith(b"\xef\xbb\xbf"):
+                        compile_log = raw[3:].decode("utf-8", errors="replace")
+                    else:
+                        # No BOM; MetaEditor typically writes UTF-16-LE. Try it first.
+                        try:
+                            compile_log = raw.decode("utf-16-le")
+                        except UnicodeDecodeError:
+                            compile_log = raw.decode("utf-8", errors="replace")
+                finally:
+                    try:
+                        os.remove(log_file_path)
+                    except OSError:
+                        pass
+            else:
+                log_read_error = f"Log file not created at {log_file_path}"
 
-            # Parse errors/warnings from log
-            errors = [l.strip() for l in compile_log.splitlines() if " error" in l.lower() or " : error" in l.lower()]
-            warnings = [l.strip() for l in compile_log.splitlines() if " warning" in l.lower()]
-            success = len(errors) == 0 and proc.returncode == 0
+            # Parse errors/warnings. MetaEditor lines look like:
+            #   "file.mq5(123,45) : error 145: syntax error"
+            # Summary line "Result: 0 error(s), 0 warning(s)" must NOT be treated as an error.
+            error_re = re.compile(r':\s*error\s+\d+\s*:', re.IGNORECASE)
+            warning_re = re.compile(r':\s*warning\s+\d+\s*:', re.IGNORECASE)
+            errors = [l.strip() for l in compile_log.splitlines() if error_re.search(l)]
+            warnings = [l.strip() for l in compile_log.splitlines() if warning_re.search(l)]
+
+            # Extract summary "N error(s), M warning(s)" — authoritative if present.
+            summary_re = re.compile(r'(\d+)\s*error\(s\)\s*,\s*(\d+)\s*warning\(s\)', re.IGNORECASE)
+            summary_match = summary_re.search(compile_log)
+            summary_err = summary_warn = None
+            if summary_match:
+                summary_err = int(summary_match.group(1))
+                summary_warn = int(summary_match.group(2))
+
+            # Success requires: log actually read AND 0 errors by both detailed and summary counts.
+            log_empty = not compile_log.strip()
+            if log_empty:
+                success = False
+                status = "log_empty_or_unreadable"
+            elif summary_err is not None:
+                success = summary_err == 0
+                status = "summary_ok" if success else "summary_errors"
+            else:
+                success = len(errors) == 0
+                status = "no_summary_fallback"
+
+            # If log unreadable but .ex5 was rebuilt, we know compile worked.
+            if log_empty and ex5_rebuilt:
+                success = True
+                status = "ex5_rebuilt_log_unreadable"
+
+            # When compile actually produced a fresh .ex5, nudge the EA to reinit
+            # so the new version takes effect without manual detach/reattach.
+            reload_trigger = None
+            if ex5_rebuilt:
+                reload_trigger = _touch_reload_trigger()
 
             result = {
                 "success": success,
+                "status": status,
                 "return_code": proc.returncode,
+                "ex5_rebuilt": ex5_rebuilt,
+                "ex5_mtime_before": datetime.fromtimestamp(ex5_mtime_before).strftime("%Y-%m-%d %H:%M:%S") if ex5_mtime_before else None,
+                "ex5_mtime_after": datetime.fromtimestamp(ex5_mtime_after).strftime("%Y-%m-%d %H:%M:%S") if ex5_mtime_after else None,
+                "summary_errors": summary_err,
+                "summary_warnings": summary_warn,
                 "errors": errors,
                 "warnings": warnings,
-                "log": compile_log[-3000:] if len(compile_log) > 3000 else compile_log
+                "log_read_error": log_read_error,
+                "log": compile_log[-3000:] if len(compile_log) > 3000 else compile_log,
+                "command": cmd_str,
+                "metaeditor_stdout": (proc.stdout or "")[:1000],
+                "metaeditor_stderr": (proc.stderr or "")[:1000],
+                "ea_source_exists": os.path.isfile(filepath),
+                "ea_source_path": filepath,
+                "log_dir_used": log_dir,
+                "preexisting_metaeditor_instances": preexisting_instances,
+                "tasklist_error": tasklist_err,
+                "reload_trigger": reload_trigger,
             }
-            logging.info(f"Strategy compilation: {'SUCCESS' if success else 'FAILED'}")
+            if not success:
+                hints = []
+                if preexisting_instances > 0:
+                    hints.append(
+                        f"检测到 {preexisting_instances} 个 MetaEditor64.exe 已在运行——这是最常见的静默失败原因。"
+                        "MT5 的 MetaEditor 是单实例应用，新的 CLI 调用会通过 IPC 转发给已存在的实例然后立即退出返回 0，"
+                        "真正的编译要么被老实例排队处理要么被忽略。请关闭所有 MetaEditor 窗口后重试。"
+                    )
+                if preexisting_instances == 0 and not ex5_rebuilt:
+                    hints.append(
+                        "MetaEditor 没有前置实例但 .ex5 未重编译——可能是源文件未被 EA 使用(未挂载)、"
+                        "或 MetaEditor 对该目录无写权限(UAC 重定向到 VirtualStore)。"
+                    )
+                if log_empty:
+                    hints.append(
+                        "日志文件未生成，MetaEditor 可能在 /compile 参数解析阶段就失败了——"
+                        "请手动跑一次: MetaEditor64.exe /compile:\"<path>\" /log:\"<writable_path>\" 观察行为。"
+                    )
+                result["hint"] = " ".join(hints) if hints else (
+                    "MetaEditor 的 return_code 经常是 0 即使编译失败，判断要看 summary_errors 或 ex5_rebuilt。"
+                )
+            logging.info(f"Strategy compilation: status={status}, success={success}")
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+        if name == "diagnose_params_sources":
+            filepath = _get_strategy_file_path()
+            source_params = []
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    source_params = _parse_input_params(f.read())
+            except Exception as exc:
+                logging.warning(f"diagnose_params_sources: read source failed: {exc}")
+
+            ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+            runtime_info = _get_runtime_json_info(ea_name)
+            config_info = _get_config_set_info(ea_name)
+            chr_candidates = _scan_chart_profiles_for_ea(ea_name)
+            chr_report = [
+                {
+                    "path": c["path"],
+                    "mtime": datetime.fromtimestamp(c["mtime"]).strftime("%Y-%m-%d %H:%M:%S"),
+                    "param_count": len(c["params"]),
+                    "params": c["params"],
+                }
+                for c in chr_candidates
+            ]
+
+            set_path = None
+            set_content = None
+            set_mtime = None
+            try:
+                set_path = get_strategy().set_path
+            except RuntimeError:
+                pass
+            if set_path and os.path.isfile(set_path):
+                try:
+                    with open(set_path, "r", encoding="utf-8", errors="replace") as f:
+                        set_content = f.read()
+                    set_mtime = datetime.fromtimestamp(os.path.getmtime(set_path)).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception as exc:
+                    set_content = f"<read failed: {exc}>"
+
+            picked_chr = chr_report[0] if chr_report else None
+            effective_source = (
+                "runtime_json" if runtime_info and runtime_info.get("exists")
+                else ("config_set" if config_info and config_info.get("exists")
+                else ("chart_profile" if picked_chr else None))
+            )
+            result = {
+                "ea_name": ea_name,
+                "ea_source_file": filepath,
+                "effective_source": effective_source,
+                "runtime_json": runtime_info,
+                "config_set": config_info,
+                "source_defaults": {p["name"]: p["value"] for p in source_params},
+                "set_file": {
+                    "path": set_path,
+                    "exists": bool(set_content and not set_content.startswith("<read failed")),
+                    "mtime": set_mtime,
+                    "content": set_content,
+                },
+                "chart_profile_files_found": len(chr_report),
+                "chart_profile_picked": picked_chr["path"] if picked_chr else None,
+                "chart_profile_all": chr_report,
+                "note": (
+                    "优先级: runtime_json (EA 每次 OnInit/OnTimer 热更后写入, 最真实) > config_set (MCP 写入的热更新覆盖) > chart_profile (.chr, 可能过时) > set_file > source_defaults。"
+                    "update_strategy_param 写 config_set；compile_strategy 成功会自动写 reload.trigger 触发 EA 重新 init。"
+                ),
+            }
             return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         if name == "get_strategy_backups":
