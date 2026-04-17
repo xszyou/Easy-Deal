@@ -8,7 +8,11 @@
       "Bash(ls:*)",
       "Bash(git add:*)",
       "Bash(git commit -m ':*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git commit *)",
+      "Bash(xargs grep *)",
+      "Bash(python3 *)",
+      "Bash(\"D:\\\\anaconda3\\\\envs\\\\fxai\\\\python.exe\" -c \"import mcp; print\\(mcp.__version__\\)\")"
     ],
     "deny": [],
     "ask": []
