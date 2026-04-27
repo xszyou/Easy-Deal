@@ -17,7 +17,7 @@
 
 
 // 输入参数 (默认值；运行时可被 MQL5/Files/GMarket_config.set 覆盖)
-input double InpFirstLots = 0.01;              // 起手大小
+input double InpFirstLots = 0.03;              // 起手大小
 input double InpStep = 0.8;                    // 梯级（百分比）
 input double InpMartinInterval = 1.2;          // 马丁最小矩离（百分比）
 input double InpFilter = 0.1;                  // 虑波器（百分比）
@@ -109,6 +109,14 @@ datetime nextLadderResetAttemptTime = 0;
 const int LADDER_RESET_MIN_INTERVAL = 5;
 bool breakevenReloadBlock = false;
 long lastBreakevenTicket = -1;
+
+// Martin 失败退避（2026-04-27 加入，防 04-24 22:14 那种秒级重试风暴）
+datetime lastSellMartinFailTime = 0;
+int sellMartinFailCount = 0;
+datetime lastBuyMartinFailTime = 0;
+int buyMartinFailCount = 0;
+datetime lastSellMartinBackoffLogTime = 0;
+datetime lastBuyMartinBackoffLogTime = 0;
 
 int atrHandle = INVALID_HANDLE;
 int bandsHandle = INVALID_HANDLE;
@@ -290,6 +298,21 @@ long GetPositionTicketFromDeal(ulong dealTicket)
    }
    long positionId = (long)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
    return positionId > 0 ? positionId : -1;
+}
+
+// Martin 失败退避：返回还需等待秒数；0=允许重试。
+// 退避梯度：1 次失败 -> 5s，2 次 -> 30s，3 次及以上 -> 120s。
+// 距上次失败超过 300s 视为冷却完成，重新允许并由上层负责清零。
+int MartinBackoffRemaining(datetime lastFail, int failCount)
+{
+   if (lastFail == 0) return 0;
+   datetime now = TimeCurrent();
+   int elapsed = (int)(now - lastFail);
+   if (elapsed >= 300) return 0;
+   int wait = 5;
+   if (failCount >= 2) wait = 30;
+   if (failCount >= 3) wait = 120;
+   return elapsed >= wait ? 0 : (wait - elapsed);
 }
 
 long SendMarketOrder(ENUM_ORDER_TYPE orderType, double volume, string comment)
@@ -1001,6 +1024,7 @@ bool ReloadRuntimeConfig(bool forceApply)
        PrintFormat("ReloadRuntimeConfig: %d applied, %d unknown (mtime=%s)",
                    applied, unknown, TimeToString(mtime, TIME_DATE | TIME_SECONDS));
     }
+    if (applied > 0) UpdateButtonState();
     return applied > 0;
   }
 
@@ -1201,32 +1225,30 @@ void CheckEntryConditions()
 
    isFollow = true;
 
-    // Hedge entry
+    // Hedge entry: open BUY first; only open SELL after BUY confirms.
+    // If BUY fails -> nothing to clean up, back off via retrySeconds.
+    // If SELL fails -> keep BUY leg, mark isOpenPosition=true; RecoverMissingOrders fills SELL on its cadence.
+    // No local cleanup / no immediate retry, to avoid spread-bleed when broker repeatedly rejects one side.
     if(isFollow) {
         lastBuyOrderTick = SendMarketOrder(ORDER_TYPE_BUY, firstLots, "Buy first order");
-        lastSellOrderTick = SendMarketOrder(ORDER_TYPE_SELL, firstLots, "Sell first order");
-        if (lastBuyOrderTick < 0 || lastSellOrderTick < 0) {
+        if (lastBuyOrderTick < 0) {
             int err = GetLastError();
-            if (lastBuyOrderTick > 0) {
-               ClosePositionByTicket(lastBuyOrderTick);
-            }
-            if (lastSellOrderTick > 0) {
-               ClosePositionByTicket(lastSellOrderTick);
-            }
-            lastBuyOrderTick = -1;
-            lastSellOrderTick = -1;
             isFollow = false;
-           int retryDelay = retrySeconds > 0 ? retrySeconds : 1800;
-           openTime = TimeCurrent() + retryDelay;
-           printfPro("OrderSend failed with error #" + err + ", retry in " + retryDelay + "s");
-           return;
-       } else {
-           printfPro("Hedge orders opened");
-           isOpenPosition = true;
-           isFollow = false;
-           followType = -1;
-           lastMartinBaseTicket = -1;
+            int retryDelay = retrySeconds > 0 ? retrySeconds : 1800;
+            openTime = TimeCurrent() + retryDelay;
+            printfPro("Buy first order failed #" + err + ", retry in " + retryDelay + "s");
+            return;
         }
+        Sleep(500); // broker anti-scalping: delay before opposite leg
+        lastSellOrderTick = SendMarketOrder(ORDER_TYPE_SELL, firstLots, "Sell first order");
+        if (lastSellOrderTick < 0) {
+            int err = GetLastError();
+            printfPro("Sell first order failed #" + err + "; keeping Buy leg, deferring to RecoverMissingOrders");
+        }
+        isOpenPosition = true;
+        isFollow = false;
+        followType = -1;
+        lastMartinBaseTicket = -1;
     }
 
    
@@ -1766,7 +1788,17 @@ void CheckAddAndTakeProfitConditions() {
           (martinBasePrice - GetAsk()) / martinBasePrice * 100 <= 0 - martinInterval &&
           (GetBid() - ladderPrice) / ladderPrice * 100 <= 0 - filter &&
           ladderProfit < 0 && martinBaseProfit < 0){
-               
+
+         int sellWait = MartinBackoffRemaining(lastSellMartinFailTime, sellMartinFailCount);
+         if (sellWait > 0){
+            datetime nowTs = TimeCurrent();
+            if (nowTs - lastSellMartinBackoffLogTime >= 30){
+               printfPro("Sell martin backoff: " + sellWait + "s left (failCount=" + sellMartinFailCount + ")");
+               lastSellMartinBackoffLogTime = nowTs;
+            }
+            return;
+         }
+
          if (maxMartinLevel > 0 && seek >= maxMartinLevel){
              printfPro("Max Martin Level Reached (L" + seek + ")");
              return;
@@ -1837,13 +1869,17 @@ void CheckAddAndTakeProfitConditions() {
             martinOrderCount ++;
             seek ++;
             lastMartinOrderTick = newMartinTicket;
+            sellMartinFailCount = 0;
+            lastSellMartinFailTime = 0;
             printfPro("Sell martin");
-            
+
             // draw line
             ObjectDelete(0, "MartinLine");
             ObjectCreate(0, "MartinLine", OBJ_HLINE, 0, 0, CalculateMartinOrdersTotalCost());
          }else {
-            printfPro("Sell martin order failed #" + GetLastError());
+            lastSellMartinFailTime = TimeCurrent();
+            sellMartinFailCount ++;
+            printfPro("Sell martin order failed #" + GetLastError() + " (failCount=" + sellMartinFailCount + ", will backoff)");
             bool rollbackOk = ClosePositionByTicket(newSellBase);
             if (rollbackOk){
                lastSellOrderTick = prevSellBase;
@@ -1885,6 +1921,16 @@ void CheckAddAndTakeProfitConditions() {
           (GetBid() - martinBasePrice) / martinBasePrice * 100 <= 0 - martinInterval &&
           (ladderPrice - GetAsk()) / ladderPrice * 100 <= 0 - filter &&
           ladderProfit < 0 && martinBaseProfit < 0){
+
+         int buyWait = MartinBackoffRemaining(lastBuyMartinFailTime, buyMartinFailCount);
+         if (buyWait > 0){
+            datetime nowTs2 = TimeCurrent();
+            if (nowTs2 - lastBuyMartinBackoffLogTime >= 30){
+               printfPro("Buy martin backoff: " + buyWait + "s left (failCount=" + buyMartinFailCount + ")");
+               lastBuyMartinBackoffLogTime = nowTs2;
+            }
+            return;
+         }
 
          if (maxMartinLevel > 0 && seek >= maxMartinLevel){
              printfPro("Max Martin Level Reached (L" + seek + ")");
@@ -1957,14 +2003,18 @@ void CheckAddAndTakeProfitConditions() {
             martinOrderCount ++;
             seek ++;
             lastMartinOrderTick = newMartinTicket2;
+            buyMartinFailCount = 0;
+            lastBuyMartinFailTime = 0;
             printfPro("Buy martin");
-            
+
             // draw line
             ObjectDelete(0, "MartinLine");
             ObjectCreate(0, "MartinLine", OBJ_HLINE, 0, 0, CalculateMartinOrdersTotalCost());
-   
+
          }else {
-            printfPro("Buy martin order failed #" + GetLastError());
+            lastBuyMartinFailTime = TimeCurrent();
+            buyMartinFailCount ++;
+            printfPro("Buy martin order failed #" + GetLastError() + " (failCount=" + buyMartinFailCount + ", will backoff)");
             bool rollbackOk2 = ClosePositionByTicket(newBuyBase);
             if (rollbackOk2){
                lastBuyOrderTick = prevBuyBase;
@@ -2279,7 +2329,8 @@ void RecoverMissingOrders() {
         if(lastBuyOrderTick > 0) printfPro("Buy Leg Recovered: #" + IntegerToString(lastBuyOrderTick));
         attempted = true;
     }
-    
+
+    if (attempted) Sleep(500); // broker anti-scalping: delay before opposite leg
     if (lastSellOrderTick == -1) {
         printfPro("Missing Sell Leg (Ticket -1). Attempting recovery...");
         lastSellOrderTick = SendMarketOrder(ORDER_TYPE_SELL, firstLots, "Sell base recovery");
@@ -2334,6 +2385,8 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
 void CreateGUI()
 {
+   ObjectsDeleteAll(0, UI_PREFIX); // self-heal: force clean slate so reinit races can't leave stale objects
+
    // Bottom-Left Info Labels
    CreateLabel("LblInfo1", 20, 120, "Martin Level: --");
    CreateLabel("LblInfo2", 20, 100, "Direction: --");
@@ -2388,10 +2441,18 @@ void CreateButton(string name, string text, ENUM_BASE_CORNER corner, int x, int 
 
 void UpdateButtonState()
 {
+   static bool rebuilding = false;
+   if (!rebuilding && ObjectFind(0, UI_PREFIX + "BtnPause") < 0) {
+      rebuilding = true;
+      CreateGUI();
+      rebuilding = false;
+      return;
+   }
    SetButtonState("BtnReload", "Reload EA State", clrGray); // Stateless button
    SetButtonState("BtnPause", isPaused ? "Resume Strategy" : "Pause Strategy", isPaused ? COLOR_BTN_OFF : COLOR_BTN_ON);
    SetButtonState("BtnMartin", martinEnabled ? "Martin ON" : "Martin OFF", martinEnabled ? COLOR_BTN_ON : COLOR_BTN_OFF);
    SetButtonState("BtnMagic", ignoreMagicNumber ? "Ignore Magic: ON" : "Ignore Magic: OFF", ignoreMagicNumber ? COLOR_BTN_ON : clrGray);
+   ChartRedraw(); // force immediate repaint so MCP-driven color changes show without needing a tick
 }
 
 void SetButtonState(string name, string text, color bgColor)

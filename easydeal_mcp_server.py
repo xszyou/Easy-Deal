@@ -114,10 +114,6 @@ class TradingContext:
         self.max_loss = 3000
         self.comment_contains = []
         self.comment_excludes = []
-        self.set_path = os.getenv("EA_SET_PATH")
-        if not self.set_path:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            self.set_path = os.path.abspath(os.path.join(base_dir, "..", "config.set"))
         self.set_parameters = {}
 
         # 设置有效期（可选）
@@ -135,29 +131,23 @@ class TradingContext:
             self.running = False
             return
 
-        # 加载 set 文件（需要 MT5 已初始化，fallback 依赖 terminal_info）
-        set_ok, set_msg = self.load_set_file(self.set_path)
-        if not set_ok:
-            logging.warning(f"Set file load failed: {set_msg}")
-            # Fallback 1: read actual runtime params from MT5 chart profile (.chr)
-            chart_params = _load_params_from_chart_profiles()
-            if chart_params:
-                self.set_parameters = {k: self._coerce_set_value(v) for k, v in chart_params.items()}
-                logging.info(f"Loaded {len(chart_params)} runtime params from chart profile")
-            else:
-                # Fallback 2: parse input defaults from EA source code
-                try:
-                    ea_path = _get_strategy_file_path()
-                    if os.path.isfile(ea_path):
-                        with open(ea_path, "r", encoding="utf-8") as f:
-                            ea_content = f.read()
-                        parsed = _parse_input_params(ea_content)
-                        if parsed:
-                            self.set_parameters = {p["name"]: self._coerce_set_value(p["value"]) for p in parsed}
-                            self.set_path = ea_path
-                            logging.info(f"Loaded {len(parsed)} default params from EA source: {ea_path}")
-                except Exception as exc:
-                    logging.warning(f"EA source param fallback failed: {exc}")
+        # Baseline params: prefer MT5 chart profile (.chr), fallback to EA source defaults
+        chart_params = _load_params_from_chart_profiles()
+        if chart_params:
+            self.set_parameters = {k: self._coerce_set_value(v) for k, v in chart_params.items()}
+            logging.info(f"Loaded {len(chart_params)} runtime params from chart profile")
+        else:
+            try:
+                ea_path = _get_strategy_file_path()
+                if os.path.isfile(ea_path):
+                    with open(ea_path, "r", encoding="utf-8") as f:
+                        ea_content = f.read()
+                    parsed = _parse_input_params(ea_content)
+                    if parsed:
+                        self.set_parameters = {p["name"]: self._coerce_set_value(p["value"]) for p in parsed}
+                        logging.info(f"Loaded {len(parsed)} default params from EA source: {ea_path}")
+            except Exception as exc:
+                logging.warning(f"EA source param fallback failed: {exc}")
 
         ok, msg = self.load_profile(self.profile_path)
         if not ok:
@@ -181,7 +171,20 @@ class TradingContext:
         logging.info(f"载入交易上下文，交易币对: {self.symbol}")
 
     def get_config_info(self):
-        """获取配置信息"""
+        """获取配置信息。set_parameters 按优先级合并 runtime_json > config_set > source_default。"""
+        runtime_params = _load_params_from_runtime_json() or {}
+        config_params = _load_params_from_config_set() or {}
+        effective = dict(self.set_parameters)
+        for k, v in config_params.items():
+            effective[k] = self._coerce_set_value(v) if isinstance(v, str) else v
+        for k, v in runtime_params.items():
+            effective[k] = self._coerce_set_value(v) if isinstance(v, str) else v
+
+        runtime_source = (
+            "runtime_json" if runtime_params
+            else ("config_set" if config_params else "baseline")
+        )
+
         return {
             "parameters": {
                 "symbols": self.symbols,
@@ -193,8 +196,9 @@ class TradingContext:
                 "comment_excludes": self.comment_excludes
             },
             "profile_path": self.profile_path,
-            "set_path": self.set_path,
-            "set_parameters": self.set_parameters,
+            "set_parameters": effective,
+            "set_parameters_source": runtime_source,
+            "config_set_path": _get_config_set_path(),
             "ea_file_path": _get_strategy_file_path(),
             "metaeditor_path": _get_metaeditor_path(),
             "expiry_date": self.expiry_date.strftime("%Y-%m-%d %H:%M:%S") if self.expiry_date else None,
@@ -294,54 +298,6 @@ class TradingContext:
             return int(raw)
         except ValueError:
             return raw
-
-    def load_set_file(self, path: str) -> tuple[bool, str]:
-        if not path:
-            self.set_parameters = {}
-            return False, "set file path is empty"
-        if not os.path.exists(path):
-            self.set_parameters = {}
-            return False, f"set file not found: {path}"
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
-        except Exception as exc:
-            self.set_parameters = {}
-            return False, f"failed to read set file: {exc}"
-
-        params = {}
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith(";") or stripped.startswith("#"):
-                continue
-            if "=" not in stripped:
-                continue
-            key, value = stripped.split("=", 1)
-            key = key.strip()
-            value = value.strip()
-            if not key:
-                continue
-            if "||" in value:
-                value = value.split("||", 1)[0].strip()
-            params[key] = self._coerce_set_value(value)
-
-        self.set_parameters = params
-        self.set_path = path
-
-        mapped = []
-        if "MAGIC_NUMBER" in params:
-            try:
-                magic_value = int(params["MAGIC_NUMBER"])
-                self.magic_numbers = [magic_value]
-                self.magic_number = magic_value
-                mapped.append("MAGIC_NUMBER")
-            except (TypeError, ValueError):
-                logging.warning("Invalid MAGIC_NUMBER in set file: %s", params["MAGIC_NUMBER"])
-
-        message = f"loaded set file: {path}"
-        if mapped:
-            message = f"{message}; mapped: {', '.join(mapped)}"
-        return True, message
 
     def load_profile(self, path: str) -> tuple[bool, str]:
         if not path:
@@ -470,7 +426,8 @@ class TradingContext:
             },
             "terminal": {
                 "connected": terminal_info.connected if terminal_info else False,
-                "ping": terminal_info.ping_last if terminal_info else -1,
+                # ping_last 来自 MT5 Python API，单位是微秒；统一转成毫秒以匹配 MT5 界面显示
+                "ping": int(terminal_info.ping_last / 1000) if terminal_info else -1,
                 "trade_allowed": terminal_info.trade_allowed if terminal_info else False
             },
             "market_data": {
@@ -2720,22 +2677,44 @@ def _read_mt5_log(log_dir: str, date_str: str, keyword: str = None,
             )[:10]
         return {"error": f"Log file not found: {log_path}", "available_dates": available}
 
-    # Read file with encoding detection
+    # Read file with encoding detection. MT5 writes UTF-16 (often BE with BOM
+    # 0xFE 0xFF, sometimes LE 0xFF 0xFE). Earlier impl assumed LE and only
+    # rejected based on a NUL heuristic, which silently corrupted BE files.
+    try:
+        with open(log_path, "rb") as f:
+            raw = f.read()
+    except Exception as e:
+        return {"error": f"Failed to read log file: {log_path}: {e}"}
+
     content = None
-    for enc in ("utf-16-le", "utf-8", "latin-1"):
-        try:
-            with open(log_path, "r", encoding=enc, errors="replace") as f:
-                content = f.read()
-            if enc == "utf-16-le" and "\x00" not in content[:100]:
-                content = None
-                continue
-            break
-        except Exception:
-            continue
+    if raw.startswith(b"\xff\xfe"):
+        content = raw[2:].decode("utf-16-le", errors="replace")
+    elif raw.startswith(b"\xfe\xff"):
+        content = raw[2:].decode("utf-16-be", errors="replace")
+    elif raw.startswith(b"\xef\xbb\xbf"):
+        content = raw[3:].decode("utf-8", errors="replace")
+    else:
+        sample = raw[:1024]
+        half = len(sample) // 2
+        if half:
+            zeros_even = sum(1 for i in range(0, half * 2, 2) if sample[i] == 0)
+            zeros_odd = sum(1 for i in range(1, half * 2, 2) if sample[i] == 0)
+            if zeros_even / half > 0.3:
+                content = raw.decode("utf-16-be", errors="replace")
+            elif zeros_odd / half > 0.3:
+                content = raw.decode("utf-16-le", errors="replace")
+        if content is None:
+            for enc in ("utf-8", "gbk", "latin-1"):
+                try:
+                    content = raw.decode(enc, errors="replace")
+                    break
+                except Exception:
+                    continue
 
     if content is None:
-        return {"error": f"Failed to read log file: {log_path}"}
+        return {"error": f"Failed to decode log file: {log_path}"}
 
+    content = content.replace("\x00", "")
     lines = [l.strip() for l in content.splitlines() if l.strip()]
 
     if keyword:
@@ -2969,7 +2948,7 @@ def get_all_tools() -> list[Tool]:
         ),
         Tool(
             name="get_ea_logs",
-            description="获取 EA 策略的 Print() 输出日志（交易决策、开平仓、策略触发事件等）。从 MT5 数据目录 MQL5/Logs/ 读取，倒序分页（page=1 最新）。",
+            description="获取 EA 策略的 Print() 输出日志（交易决策、开平仓、马丁触发等）。从 MT5 数据目录 MQL5/Logs/ 读取，倒序分页（page=1 最新）。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3007,8 +2986,36 @@ def get_all_tools() -> list[Tool]:
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
         Tool(
+            name="get_klines",
+            description=(
+                "获取 K 线 OHLC 数据。支持多种时图（M1/M5/M15/M30/H1/H4/D1/W1/MN1）和任意条数。"
+                "默认从最近已收盘那根向前取。用于波动率分析、回放行情、判断趋势强弱等。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "timeframe": {
+                        "type": "string",
+                        "description": "时图：M1/M5/M15/M30/H1/H4/D1/W1/MN1，默认 H1",
+                        "default": "H1"
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "返回的 K 线条数，默认 2，最大 500",
+                        "default": 2
+                    },
+                    "include_current": {
+                        "type": "boolean",
+                        "description": "是否包含当前未收盘的那根 bar，默认 false（只返回已收盘 bar）",
+                        "default": False
+                    }
+                },
+                "required": []
+            }
+        ),
+        Tool(
             name="get_config",
-            description="获取监控配置及 EA 运行参数。参数自动按优先级获取：1) .set 文件 2) MT5 图表配置(.chr)中的实际运行值 3) EA 源码 input 默认值。同时返回 EA 源码路径和 MetaEditor 路径。",
+            description="获取监控配置及 EA 运行参数。参数按优先级合并：runtime_json (EA 实际运行值) > config_set (MCP 写入的热更新覆盖) > 源码默认值。同时返回 EA 源码路径和 MetaEditor 路径。",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
         Tool(
@@ -3039,7 +3046,7 @@ def get_all_tools() -> list[Tool]:
         # ---------- Strategy script improvement tools ----------
         Tool(
             name="read_strategy_source",
-            description="读取当前 EA 策略源码（.mq5，带行号）。EA 文件名按 EA_FILENAME/EA_FILE_PATH 环境变量或 .chr 自动检测决定。可指定行范围以减少输出量。",
+            description="读取 GMarket.mq5 策略源码（带行号）。可指定行范围以减少输出量。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3051,15 +3058,15 @@ def get_all_tools() -> list[Tool]:
         ),
         Tool(
             name="get_strategy_params",
-            description="获取 EA 所有 input 参数的完整视图：同时返回 EA 运行时实际值(runtime_json, EA OnInit 写入, 最准)、.chr 文件值、.set 文件值、源码默认值，并标注当前生效值(effective_value)。参数读不准时首选此工具。",
+            description="获取 EA 所有 input 参数的完整视图：同时返回 runtime_json (EA OnInit/OnTimer 写入, 最准)、config_set (MCP 热更新覆盖) 与源码默认值，并标注当前生效值(effective_value)。参数读不准时首选此工具。",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
         Tool(
             name="update_strategy_param",
             description=(
-                "热更新 EA 运行时参数：向 MQL5/Files/<EA>_config.set 写入 k=v 覆盖项（<EA> 为当前加载的 EA 基名）。"
-                "需要 EA 自身实现轮询逻辑（推荐 OnTimer 周期性检查 mtime 变化并应用覆盖，同步刷新 <EA>_runtime.json），"
-                "满足此契约的 EA 无需重编译、无需重挂图表。param_name 必须是 EA 源码中 input 声明的变量名。"
+                "热更新 EA 运行时参数：向 MQL5/Files/GMarket_config.set 写入 k=v 覆盖项。"
+                "EA 每 3 秒轮询该文件，检测到 mtime 变化自动加载新值并刷新 runtime.json，"
+                "无需重编译、无需重挂图表。param_name 必须是 GMarket.mq5 中 input 声明的变量名（如 InpFirstLots, InpIsPaused, InpMagicNumber）。"
             ),
             inputSchema={
                 "type": "object",
@@ -3072,7 +3079,7 @@ def get_all_tools() -> list[Tool]:
         ),
         Tool(
             name="patch_strategy_code",
-            description="在当前 EA 的 .mq5 源码中搜索替换代码。confirm=false 仅预览匹配，confirm=true 执行替换（自动备份）。",
+            description="在 GMarket.mq5 中搜索替换代码。confirm=false 仅预览匹配，confirm=true 执行替换（自动备份）。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3086,7 +3093,7 @@ def get_all_tools() -> list[Tool]:
         Tool(
             name="compile_strategy",
             description=(
-                "【开发期编译工具 · 非查询工具】调用 MetaEditor64 对当前 EA 的 .mq5 源代码做语法编译，"
+                "【开发期编译工具 · 非查询工具】调用 MetaEditor64 对 GMarket.mq5 源代码做语法编译，"
                 "返回编译器 stderr/stdout。仅在『修改策略代码后需要重新编译』这一场景下使用。"
                 "禁止用于：查看行情/价格/点差/K线 → 请改用 get_market_info；"
                 "查看账户/持仓/订单/盘面状态 → 请改用 get_trading_status；"
@@ -3121,7 +3128,7 @@ def get_all_tools() -> list[Tool]:
         ),
         Tool(
             name="diagnose_params_sources",
-            description="诊断 EA 参数各来源的实际状态：列出所有含 EA 的 .chr 文件（路径+修改时间+参数），.set 文件路径及内容，源码默认值。当 get_strategy_params 读到的值和 MT5 图表上显示的不一致时，用此工具排查。",
+            description="诊断 EA 参数各来源的实际状态：runtime_json (EA 真实值)、config_set (MCP 覆盖)、源码默认值，以及仅供参考的 .chr 图表快照。当 get_strategy_params 读到的值和 MT5 图表上显示的不一致时，用此工具排查。",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
     ]
@@ -3151,13 +3158,28 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             elif log_type == "ERROR":
                 keywords = ["ERROR"]
 
+            # TimedRotatingFileHandler 把昨天及更早的内容轮转到
+            # easydeal.log.<YYYY-MM-DD>，active 文件 easydeal.log 只含当天。
+            today = datetime.now().strftime("%Y-%m-%d")
+            target_file = log_file
+            if date_prefix != today:
+                rotated = f"{log_file}.{date_prefix}"
+                if os.path.exists(rotated):
+                    target_file = rotated
+
             lines = _read_recent_lines(
-                log_file,
+                target_file,
                 limit=limit,
                 date_prefix=date_prefix,
                 keywords=keywords
             )
-            result = {"date": date_prefix, "type": log_type, "count": len(lines), "lines": lines}
+            result = {
+                "date": date_prefix,
+                "type": log_type,
+                "source": os.path.basename(target_file),
+                "count": len(lines),
+                "lines": lines
+            }
             return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         if name == "get_mt5_logs":
@@ -3202,6 +3224,50 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             return [TextContent(type="text", text=json.dumps(market_info, ensure_ascii=False, indent=2))]
+
+        if name == "get_klines":
+            tf_map = {
+                "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
+                "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
+                "D1": mt5.TIMEFRAME_D1, "W1": mt5.TIMEFRAME_W1, "MN1": mt5.TIMEFRAME_MN1,
+            }
+            tf_str = str(arguments.get("timeframe", "H1")).upper()
+            if tf_str not in tf_map:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": f"unsupported timeframe: {tf_str}", "supported": list(tf_map.keys())},
+                    ensure_ascii=False))]
+            try:
+                count = int(arguments.get("count", 2))
+            except (TypeError, ValueError):
+                count = 2
+            count = max(1, min(count, 500))
+            include_current = bool(arguments.get("include_current", False))
+            start_pos = 0 if include_current else 1
+            rates = mt5.copy_rates_from_pos(strategy.symbol, tf_map[tf_str], start_pos, count)
+            if rates is None or len(rates) == 0:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": "no kline data", "symbol": strategy.symbol, "timeframe": tf_str},
+                    ensure_ascii=False))]
+            bars = []
+            for r in rates:
+                bars.append({
+                    "time": datetime.fromtimestamp(int(r["time"])).strftime("%Y-%m-%d %H:%M:%S"),
+                    "open": float(r["open"]),
+                    "high": float(r["high"]),
+                    "low": float(r["low"]),
+                    "close": float(r["close"]),
+                    "tick_volume": int(r["tick_volume"]),
+                    "spread": int(r["spread"]),
+                    "real_volume": int(r["real_volume"]),
+                })
+            result = {
+                "symbol": strategy.symbol,
+                "timeframe": tf_str,
+                "count": len(bars),
+                "include_current": include_current,
+                "bars": bars,
+            }
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         if name == "get_config":
             config = strategy.get_config_info()
@@ -3248,31 +3314,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             source_params = _parse_input_params(content)
 
             runtime_params = _load_params_from_runtime_json() or {}
-            chart_params = {} if runtime_params else (_scan_chart_profiles_for_ea() or [{}])[0].get("params", {})
-            runtime_from = "runtime_json" if runtime_params else ("chart_profile" if chart_params else None)
-            runtime_params = runtime_params or chart_params
-
             config_params = _load_params_from_config_set() or {}
-
-            set_params: dict = {}
-            set_path = None
-            try:
-                set_path = get_strategy().set_path
-            except RuntimeError:
-                pass
-            if set_path and set_path.lower().endswith(".set") and os.path.isfile(set_path):
-                try:
-                    with open(set_path, "r", encoding="utf-8", errors="replace") as f:
-                        for line in f:
-                            s = line.strip()
-                            if not s or s.startswith(";") or s.startswith("#") or "=" not in s:
-                                continue
-                            k, v = s.split("=", 1)
-                            v = v.split("||", 1)[0].strip() if "||" in v else v.strip()
-                            if k.strip():
-                                set_params[k.strip()] = v
-                except Exception as exc:
-                    logging.warning(f"Re-read .set file failed: {exc}")
 
             merged = []
             for p in source_params:
@@ -3280,17 +3322,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 source_val = p["value"]
                 runtime_val = runtime_params.get(pname)
                 config_val = config_params.get(pname)
-                set_val = set_params.get(pname)
 
                 if runtime_val is not None:
                     effective = str(runtime_val)
-                    source_tag = runtime_from  # "runtime_json" or "chart_profile"
+                    source_tag = "runtime_json"
                 elif config_val is not None:
                     effective = str(config_val)
                     source_tag = "config_set"
-                elif set_val is not None:
-                    effective = str(set_val)
-                    source_tag = "set_file"
                 else:
                     effective = source_val
                     source_tag = "source_default"
@@ -3304,19 +3342,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     "source_default": source_val,
                     "runtime_value": str(runtime_val) if runtime_val is not None else None,
                     "config_set_value": str(config_val) if config_val is not None else None,
-                    "set_file_value": str(set_val) if set_val is not None else None,
                 })
 
             result = {
                 "file": filepath,
                 "param_count": len(merged),
-                "runtime_source": runtime_from,
+                "runtime_source": "runtime_json" if runtime_params else None,
                 "config_set_file": _get_config_set_path(),
                 "config_set_overrides": len(config_params),
-                "set_file": set_path,
                 "params": merged,
                 "note": (
-                    "effective_value 优先级: runtime_json (EA 实际运行值, 最准) > config_set (MCP 写入的热更新覆盖) > set_file > source_default。"
+                    "effective_value 优先级: runtime_json (EA 实际运行值, 最准) > config_set (MCP 写入的热更新覆盖) > source_default。"
                     "用 update_strategy_param 写入 config_set 即可热更新，EA 3 秒内会自动应用。"
                 ),
             }
@@ -3681,26 +3717,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 for c in chr_candidates
             ]
 
-            set_path = None
-            set_content = None
-            set_mtime = None
-            try:
-                set_path = get_strategy().set_path
-            except RuntimeError:
-                pass
-            if set_path and os.path.isfile(set_path):
-                try:
-                    with open(set_path, "r", encoding="utf-8", errors="replace") as f:
-                        set_content = f.read()
-                    set_mtime = datetime.fromtimestamp(os.path.getmtime(set_path)).strftime("%Y-%m-%d %H:%M:%S")
-                except Exception as exc:
-                    set_content = f"<read failed: {exc}>"
-
             picked_chr = chr_report[0] if chr_report else None
             effective_source = (
                 "runtime_json" if runtime_info and runtime_info.get("exists")
                 else ("config_set" if config_info and config_info.get("exists")
-                else ("chart_profile" if picked_chr else None))
+                else "source_defaults")
             )
             result = {
                 "ea_name": ea_name,
@@ -3709,18 +3730,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 "runtime_json": runtime_info,
                 "config_set": config_info,
                 "source_defaults": {p["name"]: p["value"] for p in source_params},
-                "set_file": {
-                    "path": set_path,
-                    "exists": bool(set_content and not set_content.startswith("<read failed")),
-                    "mtime": set_mtime,
-                    "content": set_content,
+                "chart_profile_reference": {
+                    "note": "MT5 图表快照，EA 挂载时才回写，可能过时。仅供诊断，不参与 effective_value 计算。",
+                    "files_found": len(chr_report),
+                    "picked": picked_chr["path"] if picked_chr else None,
+                    "all": chr_report,
                 },
-                "chart_profile_files_found": len(chr_report),
-                "chart_profile_picked": picked_chr["path"] if picked_chr else None,
-                "chart_profile_all": chr_report,
                 "note": (
-                    "优先级: runtime_json (EA 每次 OnInit/OnTimer 热更后写入, 最真实) > config_set (MCP 写入的热更新覆盖) > chart_profile (.chr, 可能过时) > set_file > source_defaults。"
+                    "优先级: runtime_json (EA 每次 OnInit/OnTimer 热更后写入, 最真实) > config_set (MCP 写入的热更新覆盖) > source_defaults。"
                     "update_strategy_param 写 config_set；compile_strategy 成功会自动写 reload.trigger 触发 EA 重新 init。"
+                    "chart_profile (.chr) 已从优先级链移除，仅作为参考。"
                 ),
             }
             return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
