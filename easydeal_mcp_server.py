@@ -2279,7 +2279,7 @@ def _detect_ea_from_charts() -> str | None:
     """Detect the EA name currently loaded on a chart by scanning .chr files.
 
     Looks for <expert> blocks in chart profiles and extracts the EA .ex5 name.
-    Returns the .mq5 source filename (e.g. 'GMarket.mq5') or None.
+    Returns the .mq5 source filename (e.g. 'YourEA.mq5') or None.
     """
     try:
         info = mt5.terminal_info()
@@ -2328,6 +2328,23 @@ def _detect_ea_from_charts() -> str | None:
 # Cache to avoid scanning .chr files on every call
 _cached_ea_filename: str | None = None
 
+# Legacy default — kept ONLY for backward compatibility when chart auto-detect
+# fails AND EA_FILENAME env var is unset. New deployments should rely on
+# auto-detection or set EA_FILENAME / EA_FILE_PATH explicitly.
+_DEFAULT_EA_FILENAME = "GMarket.mq5"
+
+
+def _resolve_ea_filename() -> str:
+    """Return the active EA's .mq5 filename.
+
+    Resolution order:
+      1. Cached value from MT5 chart .chr auto-detection (set by
+         _detect_ea_from_charts on first call to _get_strategy_file_path).
+      2. EA_FILENAME environment variable.
+      3. Legacy default _DEFAULT_EA_FILENAME.
+    """
+    return _cached_ea_filename or os.getenv("EA_FILENAME") or _DEFAULT_EA_FILENAME
+
 
 def _get_strategy_file_path() -> str:
     """Return the absolute path to the EA .mq5 strategy file.
@@ -2336,7 +2353,7 @@ def _get_strategy_file_path() -> str:
     1. EA_FILE_PATH env var (full path to .mq5 file)
     2. Auto-detect from MT5 chart profile (.chr) to find which EA is loaded,
        then locate its .mq5 source in MQL5/Experts/
-    3. EA_FILENAME env var (default GMarket.mq5) in MQL5/Experts/
+    3. EA_FILENAME env var (legacy default _DEFAULT_EA_FILENAME) in MQL5/Experts/
     4. Fallback to project directory
     """
     global _cached_ea_filename
@@ -2359,7 +2376,7 @@ def _get_strategy_file_path() -> str:
             _cached_ea_filename = detected
 
     # Determine filename to search for
-    ea_filename = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+    ea_filename = _resolve_ea_filename()
 
     # 3. Look in MT5 data directory
     if data_path:
@@ -2408,7 +2425,7 @@ def _load_params_from_runtime_json(ea_name: str = None) -> dict | None:
     Returns {param_name: value_as_string} or None if file missing/invalid.
     """
     if ea_name is None:
-        ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+        ea_name = _resolve_ea_filename()
     ea_base = os.path.splitext(ea_name)[0]
 
     try:
@@ -2441,7 +2458,7 @@ def _load_params_from_runtime_json(ea_name: str = None) -> dict | None:
 def _get_runtime_json_info(ea_name: str = None) -> dict | None:
     """Return metadata about the runtime JSON file for diagnostics."""
     if ea_name is None:
-        ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+        ea_name = _resolve_ea_filename()
     ea_base = os.path.splitext(ea_name)[0]
 
     try:
@@ -2468,7 +2485,7 @@ def _get_runtime_json_info(ea_name: str = None) -> dict | None:
 def _get_config_set_path(ea_name: str = None) -> str | None:
     """Return path to MQL5/Files/<EA>_config.set (MCP-written runtime overrides)."""
     if ea_name is None:
-        ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+        ea_name = _resolve_ea_filename()
     ea_base = os.path.splitext(ea_name)[0]
     data_path = _get_mt5_data_path()
     if not data_path:
@@ -2522,7 +2539,7 @@ def _touch_reload_trigger(ea_name: str = None) -> dict:
     """Write current epoch to MQL5/Files/<EA>_reload.trigger so EA's OnTimer
     detects the bump and calls ChartSetSymbolPeriod to force reinit."""
     if ea_name is None:
-        ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+        ea_name = _resolve_ea_filename()
     ea_base = os.path.splitext(ea_name)[0]
     data_path = _get_mt5_data_path()
     if not data_path:
@@ -2564,7 +2581,7 @@ def _scan_chart_profiles_for_ea(ea_name: str = None) -> list[dict]:
     Used by both _load_params_from_chart_profiles (uses [0]) and diagnostics.
     """
     if ea_name is None:
-        ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+        ea_name = _resolve_ea_filename()
     ea_ex5 = os.path.splitext(ea_name)[0] + ".ex5"
 
     try:
@@ -3046,7 +3063,7 @@ def get_all_tools() -> list[Tool]:
         # ---------- Strategy script improvement tools ----------
         Tool(
             name="read_strategy_source",
-            description="读取 GMarket.mq5 策略源码（带行号）。可指定行范围以减少输出量。",
+            description="读取当前 EA 的 .mq5 策略源码（带行号）。EA 文件由 chart auto-detect / EA_FILENAME / EA_FILE_PATH 解析。可指定行范围以减少输出量。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3064,9 +3081,9 @@ def get_all_tools() -> list[Tool]:
         Tool(
             name="update_strategy_param",
             description=(
-                "热更新 EA 运行时参数：向 MQL5/Files/GMarket_config.set 写入 k=v 覆盖项。"
+                "热更新 EA 运行时参数：向 MQL5/Files/<EA>_config.set 写入 k=v 覆盖项（<EA> 为当前 EA 文件名去掉后缀）。"
                 "EA 每 3 秒轮询该文件，检测到 mtime 变化自动加载新值并刷新 runtime.json，"
-                "无需重编译、无需重挂图表。param_name 必须是 GMarket.mq5 中 input 声明的变量名（如 InpFirstLots, InpIsPaused, InpMagicNumber）。"
+                "无需重编译、无需重挂图表。param_name 必须是当前 EA .mq5 中 input 声明的变量名（如 InpFirstLots, InpIsPaused, InpMagicNumber）。"
             ),
             inputSchema={
                 "type": "object",
@@ -3079,7 +3096,7 @@ def get_all_tools() -> list[Tool]:
         ),
         Tool(
             name="patch_strategy_code",
-            description="在 GMarket.mq5 中搜索替换代码。confirm=false 仅预览匹配，confirm=true 执行替换（自动备份）。",
+            description="在当前 EA 的 .mq5 源码中搜索替换代码。confirm=false 仅预览匹配，confirm=true 执行替换（自动备份）。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3093,7 +3110,7 @@ def get_all_tools() -> list[Tool]:
         Tool(
             name="compile_strategy",
             description=(
-                "【开发期编译工具 · 非查询工具】调用 MetaEditor64 对 GMarket.mq5 源代码做语法编译，"
+                "【开发期编译工具 · 非查询工具】调用 MetaEditor64 对当前 EA .mq5 源代码做语法编译，"
                 "返回编译器 stderr/stdout。仅在『修改策略代码后需要重新编译』这一场景下使用。"
                 "禁止用于：查看行情/价格/点差/K线 → 请改用 get_market_info；"
                 "查看账户/持仓/订单/盘面状态 → 请改用 get_trading_status；"
@@ -3410,8 +3427,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             ts_epoch = int(time.time())
             human_ts = datetime.fromtimestamp(ts_epoch).strftime("%Y-%m-%d %H:%M:%S")
+            ea_base = os.path.splitext(_resolve_ea_filename())[0]
             out_lines = [
-                f"# GMarket runtime overrides — written by easydeal_mcp at {human_ts}",
+                f"# {ea_base} runtime overrides — written by easydeal_mcp at {human_ts}",
                 "# EA OnTimer reloads this file when mtime advances (no recompile needed).",
                 f"ts={ts_epoch}",
             ]
@@ -3703,7 +3721,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             except Exception as exc:
                 logging.warning(f"diagnose_params_sources: read source failed: {exc}")
 
-            ea_name = _cached_ea_filename or os.getenv("EA_FILENAME", "GMarket.mq5")
+            ea_name = _resolve_ea_filename()
             runtime_info = _get_runtime_json_info(ea_name)
             config_info = _get_config_set_info(ea_name)
             chr_candidates = _scan_chart_profiles_for_ea(ea_name)
