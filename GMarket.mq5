@@ -1069,11 +1069,13 @@ void DumpInputsRuntime()
                     ? TimeToString(g_lastConfigApplied, TIME_DATE | TIME_SECONDS)
                     : "");
     string json = "{\n";
-    json += "  \"ea_name\": \"GMarket.mq5\",\n";
+    json += "  \"ea_name\": \"GMarket\",\n";
     json += "  \"symbol\": \"" + _Symbol + "\",\n";
     json += "  \"updated_at\": \"" + ts + "\",\n";
     json += "  \"config_applied_at\": \"" + cfgTs + "\",\n";
+    json += "  \"magic\": " + IntegerToString(MAGIC_NUMBER) + ",\n";
     json += "  \"magic_number\": " + IntegerToString(MAGIC_NUMBER) + ",\n";
+    json += "  \"ts\": " + IntegerToString((int)TimeCurrent()) + ",\n";
     json += "  \"params\": {\n";
     json += "    \"InpFirstLots\": "             + DoubleToString(firstLots, 4) + ",\n";
     json += "    \"InpStep\": "                  + DoubleToString(step, 4) + ",\n";
