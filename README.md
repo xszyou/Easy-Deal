@@ -9,6 +9,8 @@
 
 这种架构确保了交易的稳定性（EA 独立运行，不受 Python 端影响），同时赋予了系统强大的 AI 扩展能力（通过 MCP 进行自然语言交互和智能风控）。
 
+
+
 ## 主要特点
 
 ### 核心策略 (EA、可更换)
@@ -37,7 +39,7 @@
 # 联系我们
 
 ![image-20251201173859002](images/wechat.png)
-注：群满加 qq467665317
+注：商业客户端已于6月2日正式上线，联系工作人员免费体验。
 
 ---
 
@@ -399,14 +401,17 @@ openclaw agents add risk-guard --workspace ~/.openclaw/workspaces/risk-guard --n
 ---
 
 # 五、easydeal claude code版搭建教程
+
 ![讲义](<images/course4/cover.png>)
 
 ## 前置条件
+
 ![讲义](<images/course4/section-01-01.png>)
 
 启动MT5，登录到交易服务器，附加ea到xausd的图表并开启算法交易。
 
 ## 安装fay
+
 ![讲义](<images/course4/section-02-01.png>)
 
 首先请到以下网址下载并在宿主机安装fay。在windows系统上安装。
@@ -416,6 +421,7 @@ https://qqk9ntwbcit.feishu.cn/wiki/V5qcwlikKiehoYkAPhYcmBPAnAc
 ```
 
 ## 配置easydeal mcp服务
+
 ![讲义](<images/course4/section-03-01.png>)
 
 我们打开fay的管理页面，进入mcp栏，依图添加easy deal的mcp服务，easy deal的源码地址也给你们贴出来了，请提前下载并安装好python环境及依赖。
@@ -425,16 +431,19 @@ https://gitee.com/xszyou/easy-deal
 ```
 
 ## mcp启动及验证
+
 ![讲义](<images/course4/section-04-01.png>)
 
 在fay这里添加好mcp服务后，需要点击连接，等待连接上easy deal的mcp服务器，咱们就可以到fay的聊天页面测试easy deal了。在这之前大家记得启动好mt5,并把算法交易启动。
 
 ## cladue code连接mcp服务
+
 ![讲义](<images/course4/section-05-01.png>)
 
 启动claude code cli后，在claude code上输入“请连接以下mcp服务 ： [http://127.0.0.1:8765/sse”，回车等待连接成功。](http://127.0.0.1:8765/sse%E2%80%9D%EF%BC%8C%E5%9B%9E%E8%BD%A6%E7%AD%89%E5%BE%85%E8%BF%9E%E6%8E%A5%E6%88%90%E5%8A%9F%E3%80%82)
 
 ## 测试easydeal
+
 ![讲义](<images/course4/section-06-01.png>)
 
 连接成功后，重启claude code cli， 并输入“请结合mt5上的日志分析一下策略的执行情况”。
@@ -485,5 +494,3 @@ https://gitee.com/xszyou/easy-deal
 # 许可证
 
 本项目采用 GLP 3.0 许可证。
-
-
