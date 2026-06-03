@@ -2791,6 +2791,325 @@ def _get_config_set_info(ea_name: str = None) -> dict | None:
     return result
 
 
+# ================================================================================
+# EA 参数读写工具组 —— 解析 .mq5 input 声明 + 批量写参数（config.set 热更 + Presets/.set）
+# write_ea_parameters 同时写两份：(a) MQL5/Files/<EA>_config.set 走 MCP 热更新通道，
+# EA 支持的话 3s 内自动 reload；(b) MQL5/Presets/<EA>.set 是 MT5 canonical，下次重新
+# 挂载 / 启动 Strategy Tester 拿到的也是新值（不然热更 EA 关掉重开就回到老默认）。
+# ================================================================================
+
+_INPUT_RE = re.compile(
+    r"^\s*s?input\s+([A-Za-z_]\w*(?:\s*\*)?)\s+([A-Za-z_]\w*)\s*"
+    r"=\s*([^;]+?)\s*;\s*(?://\s*(.*?)\s*)?$"
+)
+_INPUT_GROUP_RE = re.compile(r"^\s*s?input\s+group\s+\"([^\"]+)\"\s*;?\s*$")
+
+
+def _parse_ea_input_declarations(mq5_path: str) -> list[dict]:
+    """Parse `input <type> <name> = <default>;` declarations from a .mq5 file.
+
+    Returns a list of {name, type, default, comment, group, line} in declaration
+    order. `group` tracks the most recent `input group "..."` annotation so the
+    UI can render sections. `default` is the raw expression as written (string,
+    e.g. "10", "0.5", "true", "\"hi\"", "PERIOD_H1"). The caller coerces.
+
+    Returns empty list if file can't be read (caller falls back to .ex5-only
+    manual-entry mode).
+    """
+    if not mq5_path or not os.path.isfile(mq5_path):
+        return []
+    text = _read_text_with_bom(mq5_path) if "_read_text_with_bom" in globals() else None
+    if text is None:
+        try:
+            with open(mq5_path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except Exception:
+            return []
+    out: list[dict] = []
+    cur_group = None
+    for idx, raw in enumerate(text.splitlines(), start=1):
+        gm = _INPUT_GROUP_RE.match(raw)
+        if gm:
+            cur_group = gm.group(1).strip()
+            continue
+        m = _INPUT_RE.match(raw)
+        if not m:
+            continue
+        typ, name, default, comment = m.group(1), m.group(2), m.group(3), m.group(4)
+        out.append({
+            "name":     name,
+            "type":     typ.replace(" ", "").replace("*", ""),
+            "default":  default.strip(),
+            "comment":  (comment or "").strip(),
+            "group":    cur_group,
+            "line":     idx,
+        })
+    return out
+
+
+def _list_ea_inputs_tool(args: dict) -> list[TextContent]:
+    """MCP tool: 解析 EA 源码，返回所有 input 声明的列表。供「参数优化」/「参数设置」
+    UI 自动填充参数表用。.ex5-only（无源码）场景返回 {ok:false, ex5_only:true}，
+    让前端切到「手工填参数列表」分支。"""
+    ea_arg = (args.get("ea_name") or "").strip()
+    ea_filename = ea_arg if ea_arg else _resolve_ea_filename()
+    if ea_filename and not ea_filename.lower().endswith(".mq5"):
+        ea_filename += ".mq5"
+
+    # 走跟 compile_strategy 同款的 EA .mq5 解析路径（workspace 优先，再 MT5 Experts/）
+    mq5_path = None
+    workspace_dir = os.getenv("EASYDEAL_WORKSPACE_DIR")
+    if workspace_dir and ea_filename:
+        cand = os.path.join(workspace_dir, "strategies", ea_filename)
+        if os.path.isfile(cand):
+            mq5_path = cand
+    if not mq5_path:
+        data_path = _get_mt5_data_path()
+        if data_path and ea_filename:
+            experts_root = os.path.join(data_path, "MQL5", "Experts")
+            if os.path.isdir(experts_root):
+                # flat 先看，再递归找
+                flat = os.path.join(experts_root, ea_filename)
+                if os.path.isfile(flat):
+                    mq5_path = flat
+                else:
+                    target_lower = ea_filename.lower()
+                    for root, _dirs, files in os.walk(experts_root):
+                        for fn in files:
+                            if fn.lower() == target_lower:
+                                mq5_path = os.path.join(root, fn)
+                                break
+                        if mq5_path:
+                            break
+    # fallback：当前 EA 当前 chart 挂的
+    if not mq5_path and not ea_arg:
+        mq5_path = _get_strategy_file_path()
+
+    if not mq5_path or not os.path.isfile(mq5_path):
+        ea_base = os.path.splitext(ea_filename)[0] if ea_filename else "(unknown)"
+        return [TextContent(type="text", text=json.dumps({
+            "ok":        False,
+            "ex5_only":  True,
+            "ea_name":   ea_base,
+            "error":     f"{ea_filename}.mq5 源码没找到 — .ex5-only 策略需要在 UI 手工填参数表",
+        }, ensure_ascii=False))]
+
+    inputs = _parse_ea_input_declarations(mq5_path)
+    return [TextContent(type="text", text=json.dumps({
+        "ok":         True,
+        "ea_name":    os.path.splitext(os.path.basename(mq5_path))[0],
+        "mq5_path":   mq5_path,
+        "input_count": len(inputs),
+        "inputs":     inputs,
+    }, ensure_ascii=False, indent=2))]
+
+
+def _detect_ea_hot_reload_support_tool(args: dict) -> list[TextContent]:
+    """检测 EA 是否支持 MCP 热更新协议（轮询 <EA>_config.set + 写 <EA>_runtime.json）。
+    判定证据：
+      (a) runtime.json 文件存在且 mtime 在最近 30 分钟内（EA 正在跑 + 在主动写）
+      (b) .mq5 源码里含「_config.set」或「_runtime.json」字符串（用了协议）
+    任一命中即视为支持。两个都没命中 → 不支持，UI 写参数时需要弹「重新挂载」确认。"""
+    ea_arg = (args.get("ea_name") or "").strip()
+    ea_filename = ea_arg if ea_arg else _resolve_ea_filename()
+    if ea_filename and not ea_filename.lower().endswith(".mq5"):
+        ea_filename += ".mq5"
+    ea_base = os.path.splitext(ea_filename)[0] if ea_filename else "(unknown)"
+
+    evidence: list[str] = []
+    supported = False
+
+    # Evidence (a): runtime.json mtime
+    data_path = _get_mt5_data_path()
+    runtime_recent = False
+    runtime_path = None
+    if data_path:
+        runtime_path = os.path.join(data_path, "MQL5", "Files", f"{ea_base}_runtime.json")
+        if os.path.isfile(runtime_path):
+            try:
+                age_sec = time.time() - os.path.getmtime(runtime_path)
+                if age_sec < 1800:  # 30 min
+                    runtime_recent = True
+                    supported = True
+                    evidence.append(f"runtime.json 最近 {int(age_sec)}s 内被 EA 写过")
+                else:
+                    evidence.append(
+                        f"runtime.json 存在但 mtime 已经 {int(age_sec/60)}min 前 — "
+                        "EA 可能没在跑或已经摘了")
+            except Exception:
+                pass
+
+    # Evidence (b): source code markers
+    workspace_dir = os.getenv("EASYDEAL_WORKSPACE_DIR")
+    src_path = None
+    if workspace_dir:
+        cand = os.path.join(workspace_dir, "strategies", ea_filename)
+        if os.path.isfile(cand):
+            src_path = cand
+    if not src_path and data_path:
+        flat = os.path.join(data_path, "MQL5", "Experts", ea_filename)
+        if os.path.isfile(flat):
+            src_path = flat
+    if src_path:
+        try:
+            with open(src_path, "r", encoding="utf-8", errors="replace") as f:
+                src_text = f.read()
+            if "_config.set" in src_text or "_runtime.json" in src_text:
+                supported = True
+                evidence.append(f"源码引用了热更新协议文件名（{src_path}）")
+        except Exception:
+            pass
+
+    return [TextContent(type="text", text=json.dumps({
+        "ok":             True,
+        "ea_name":        ea_base,
+        "supported":      supported,
+        "runtime_recent": runtime_recent,
+        "runtime_path":   runtime_path,
+        "src_path":       src_path,
+        "evidence":       evidence,
+        "advice": (
+            "支持热更新 — 写 config.set 立刻生效，3 秒内 EA 会自己 reload + 刷 runtime.json"
+            if supported else
+            "不支持热更新 — 写 .set 后需要在 MT5 里把 EA 摘了重新挂（或重启 MT5），新参数才会生效"
+        ),
+    }, ensure_ascii=False, indent=2))]
+
+
+def _write_ea_parameters_tool(args: dict) -> list[TextContent]:
+    """批量写 EA 参数。
+      params: {name: value} 字典，value 是字符串 / 数字 / bool。
+      mode: "hot" (只写 config.set，假定 EA 支持热更新)
+            "preset" (只写 Presets/<EA>.set，假定要重新挂载)
+            "both" (两个都写，默认；EA 支持热更新时立刻生效 + 下次启动 / 重挂也用新值)
+
+    .set 文件用 MT5 Presets/ 标准格式：`name=value` 每行一条。MCP 自己的
+    config.set 用 `name=value` 同款格式（已有的 _load_params_from_config_set
+    解析也是这个）。
+    """
+    ea_arg = (args.get("ea_name") or "").strip()
+    ea_filename = ea_arg if ea_arg else _resolve_ea_filename()
+    if ea_filename and not ea_filename.lower().endswith(".mq5"):
+        ea_filename += ".mq5"
+    ea_base = os.path.splitext(ea_filename)[0] if ea_filename else None
+    if not ea_base:
+        return [TextContent(type="text", text=json.dumps(
+            {"ok": False, "error": "无法确定 EA name"}, ensure_ascii=False))]
+
+    params = args.get("params") or {}
+    if not isinstance(params, dict) or not params:
+        return [TextContent(type="text", text=json.dumps(
+            {"ok": False, "error": "params 必填且非空（{name: value} 字典）"},
+            ensure_ascii=False))]
+
+    mode = (args.get("mode") or "both").lower()
+    if mode not in ("hot", "preset", "both"):
+        mode = "both"
+
+    data_path = _get_mt5_data_path()
+    if not data_path:
+        return [TextContent(type="text", text=json.dumps(
+            {"ok": False, "error": "MT5 data_path 未确定"}, ensure_ascii=False))]
+
+    # 规范化 value 为字符串（bool → true/false，其它直接 str）
+    def _fmt(v):
+        if v is True:  return "true"
+        if v is False: return "false"
+        return str(v)
+    serialized = {k: _fmt(v) for k, v in params.items()}
+
+    written: list[dict] = []
+    errors: list[str] = []
+
+    # (a) config.set —— MCP 热更新通道
+    if mode in ("hot", "both"):
+        cfg_path = os.path.join(data_path, "MQL5", "Files", f"{ea_base}_config.set")
+        try:
+            existing: dict = {}
+            if os.path.isfile(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        s = line.strip()
+                        if not s or s.startswith("#") or s.startswith(";") or "=" not in s:
+                            continue
+                        k, v = s.split("=", 1)
+                        existing[k.strip()] = v.strip()
+            existing.update(serialized)
+            existing["ts"] = str(int(time.time()))
+            os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+            with open(cfg_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(f"# auto-written by easydeal MCP write_ea_parameters @ {datetime.now().isoformat()}\n")
+                for k, v in existing.items():
+                    f.write(f"{k}={v}\n")
+            written.append({"file": cfg_path, "kind": "config.set", "params": serialized})
+            # 触发 reload — 已有助手
+            try:
+                _touch_reload_trigger(ea_filename)
+            except Exception:
+                pass
+        except Exception as e:
+            errors.append(f"写 config.set 失败: {e}")
+
+    # (b) Presets/<EA>.set —— MT5 canonical .set，下次挂 EA + 启动 Strategy Tester 用
+    if mode in ("preset", "both"):
+        # Presets 目录可能有两份：MQL5/Presets/ (Strategy Tester) + MQL5/Profiles/Tester/
+        # 但通用「右键挂 EA → Load」对话框默认看的是 MQL5/Presets/Tester/<EA>.set 或
+        # MQL5/Presets/<EA>.set；这里写 MQL5/Presets/<EA>.set，覆盖率最高的位置。
+        presets_dir = os.path.join(data_path, "MQL5", "Presets")
+        preset_path = os.path.join(presets_dir, f"{ea_base}.set")
+        try:
+            # 读已有 .set merge 新值，保留没改的 key 不动
+            existing_preset: dict = {}
+            if os.path.isfile(preset_path):
+                # MT5 .set 文件是 UTF-16 LE BOM。读的时候 utf-16 兼容
+                try:
+                    with open(preset_path, "rb") as f:
+                        raw = f.read()
+                    for enc in ("utf-16", "utf-8"):
+                        try:
+                            preset_text = raw.decode(enc)
+                            break
+                        except Exception:
+                            preset_text = ""
+                    for line in preset_text.splitlines():
+                        s = line.strip().lstrip("﻿")
+                        if not s or s.startswith(";") or s.startswith("#") or "=" not in s:
+                            continue
+                        k, v = s.split("=", 1)
+                        # MT5 tester .set 里 value 可能形如 "10||1||1||100||N"
+                        # —— 整段保留就行，下面只 override 用户改的那几条。
+                        existing_preset[k.strip()] = v.strip()
+                except Exception as e:
+                    errors.append(f"读旧 preset 失败（保留新值覆盖）: {e}")
+            existing_preset.update(serialized)
+            # MT5 .set 标准是 UTF-16 LE BOM，CRLF line ending
+            body_lines = [f"; auto-written by easydeal MCP write_ea_parameters @ {datetime.now().isoformat()}"]
+            for k, v in existing_preset.items():
+                body_lines.append(f"{k}={v}")
+            body = "\r\n".join(body_lines) + "\r\n"
+            os.makedirs(presets_dir, exist_ok=True)
+            with open(preset_path, "wb") as f:
+                f.write(b"\xff\xfe")
+                f.write(body.encode("utf-16-le"))
+            written.append({"file": preset_path, "kind": "preset.set", "params": serialized})
+        except Exception as e:
+            errors.append(f"写 Presets/.set 失败: {e}")
+
+    return [TextContent(type="text", text=json.dumps({
+        "ok":       not errors,
+        "ea_name":  ea_base,
+        "mode":     mode,
+        "written":  written,
+        "errors":   errors,
+        "hint": (
+            "config.set 已更新 + reload trigger 已触发，3s 内 EA 会自动 reload。"
+            "Presets/.set 也写了，下次重启 / 重挂 EA 也用新值。"
+            if not errors else
+            "部分写入失败 — 看 errors 数组里的具体错误"
+        ),
+    }, ensure_ascii=False, indent=2))]
+
+
 def _touch_reload_trigger(ea_name: str = None) -> dict:
     """Write current epoch to MQL5/Files/<EA>_reload.trigger so EA's OnTimer
     detects the bump and calls ChartSetSymbolPeriod to force reinit."""
@@ -3487,6 +3806,58 @@ def get_all_tools() -> list[Tool]:
                     "ea":    {"type": "string", "description": "（可选）只返回指定 EA 名的记录"},
                 },
                 "required": [],
+            },
+        ),
+        # ---- EA 参数读写工具组 ----
+        Tool(
+            name="list_ea_inputs",
+            description=(
+                "解析 EA 的 .mq5 源码，返回所有 `input` 声明列表（name/type/default/comment/group）。"
+                "供「参数优化」+「参数设置」UI 自动填充参数表用。.ex5-only 策略（无源码）返回 "
+                "{ok:false, ex5_only:true}，前端切到手工填参数列表的分支。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ea_name": {"type": "string", "description": "EA 名（不带 .mq5）；不传 = 当前 chart 挂的 EA"},
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="detect_ea_hot_reload_support",
+            description=(
+                "检测 EA 是否支持 MCP 热更新协议（轮询 config.set + 写 runtime.json）。"
+                "返回 {supported, evidence, advice}。supported=true → 写 config.set 立刻生效；"
+                "false → 需要重新挂载 / 重启 MT5 新参数才生效。前端用这个决定保存参数后是否弹"
+                "「请到 MT5 把 EA 摘了重新挂」的确认对话框。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ea_name": {"type": "string", "description": "EA 名；不传 = 当前 chart 挂的 EA"},
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="write_ea_parameters",
+            description=(
+                "批量写 EA 参数。比 update_strategy_param 一次只能改一个 key 快很多 —— "
+                "UI 表格让用户改 N 行后一次提交。同时写两份：(a) MQL5/Files/<EA>_config.set（热更"
+                "新通道，EA 支持的话立刻生效）；(b) MQL5/Presets/<EA>.set（MT5 canonical，下次"
+                "重新挂载 / 启动 Strategy Tester 用）。mode 默认 both；可以 'hot' 只写 config.set、"
+                "'preset' 只写 .set 来更精细控制。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ea_name": {"type": "string", "description": "EA 名；不传 = 当前 chart 挂的 EA"},
+                    "params":  {"type": "object", "description": "{参数名: 值} 字典；值可以是字符串 / 数字 / bool"},
+                    "mode":    {"type": "string", "enum": ["hot", "preset", "both"], "default": "both",
+                                 "description": "hot=只写 config.set；preset=只写 .set；both=两个都写"},
+                },
+                "required": ["params"],
             },
         ),
     ] + _trading_write_tools() + [   # 内部按 _is_trading_write_enabled / _is_trading_write_open_enabled 各自决定
@@ -4724,6 +5095,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         if name == "list_backtests":
             return _list_backtests_tool(arguments)
+
+        # ---- EA 参数读写工具组 ----
+        if name == "list_ea_inputs":
+            return _list_ea_inputs_tool(arguments)
+        if name == "detect_ea_hot_reload_support":
+            return _detect_ea_hot_reload_support_tool(arguments)
+        if name == "write_ea_parameters":
+            return _write_ea_parameters_tool(arguments)
 
         if name == "easydeal_debug_env":
             return _debug_env_tool()
