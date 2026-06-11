@@ -63,6 +63,109 @@ def _ts_to_bj_str(ts, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
     except Exception:
         return ""
     return ""
+
+
+# ============== 券商服务器时区偏移（同步自商业版 1.1.1） ==============
+# ⚠ MT5 所有时间戳 (copy_rates['time'] / tick.time / deal.time / position.time) 都是
+# 「券商服务器墙上时间，按 UTC 编码的 epoch」—— datetime.fromtimestamp(t, tz=utc) 还原的
+# 是服务器时钟，不是真 UTC。要转成真北京时间必须先知道券商相对 UTC 的偏移。
+# 历史 bug: get_klines 用裸 datetime.fromtimestamp(t)（按本机 TZ 解释）→ 得到「服务器时间
+# +本机偏移」的杂交值 → AI 误判出「未来 K 线」。这里用新鲜 tick 反推偏移并按券商缓存。
+_BROKER_OFFSET_CACHE: dict = {}   # broker server name -> 偏移秒数 (server - utc)
+_BROKER_OFFSET_LAST: dict = {}    # broker server name -> 上次成功探测的真 UTC 时刻
+
+
+def _broker_server_key() -> str:
+    """当前 SDK 连接的券商标识 — 偏移按券商缓存。"""
+    try:
+        ai = mt5.account_info()
+        if ai and getattr(ai, "server", None):
+            return str(ai.server)
+    except Exception:
+        pass
+    try:
+        ti = mt5.terminal_info()
+        if ti and getattr(ti, "path", None):
+            return str(ti.path)
+    except Exception:
+        pass
+    return "_default"
+
+
+def _refresh_broker_offset(symbol):
+    """用新鲜 tick 反推券商 UTC 偏移（秒，取整到 30 分钟）。tick stale(休市,|raw|>15h)
+    或拿不到 → 返回上次缓存（可能 None）。不主动扫 symbol，调用方传当前有行情的 symbol。"""
+    key = _broker_server_key()
+    if symbol:
+        try:
+            tick = mt5.symbol_info_tick(symbol)
+            if tick and getattr(tick, "time", 0):
+                raw = int(tick.time) - time.time()
+                if abs(raw) <= 15 * 3600:          # 真实券商偏移不会超过 ±15h
+                    off = int(round(raw / 1800.0) * 1800)
+                    _BROKER_OFFSET_CACHE[key] = off
+                    _BROKER_OFFSET_LAST[key] = time.time()
+                    return off
+        except Exception:
+            pass
+    return _BROKER_OFFSET_CACHE.get(key)
+
+
+def _broker_offset_sec(symbol=None):
+    """拿券商偏移（秒，server-utc）。缓存 <1h 直接用；过期且给了 symbol 则刷新；
+    都没有 → None（调用方退回显示服务器墙上时间）。"""
+    key = _broker_server_key()
+    last = _BROKER_OFFSET_LAST.get(key, 0)
+    if key in _BROKER_OFFSET_CACHE and (time.time() - last) < 3600:
+        return _BROKER_OFFSET_CACHE[key]
+    return _refresh_broker_offset(symbol)
+
+
+def _mt5_epoch_to_bj_str(epoch, offset_sec, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """MT5 server-epoch → 真北京时间字符串。offset_sec=券商相对 UTC 偏移秒数；
+    None=偏移未知 → 退回显示服务器墙上时间（仍比裸 fromtimestamp 更接近真值）。"""
+    if epoch is None:
+        return ""
+    try:
+        ep = int(epoch)
+        if not ep:
+            return ""
+        if offset_sec is None:
+            return datetime.fromtimestamp(ep, tz=pytz.utc).strftime(fmt)   # 服务器墙上时间
+        return datetime.fromtimestamp(ep - int(offset_sec), tz=BJ_TZ).strftime(fmt)
+    except Exception:
+        return ""
+
+
+# ============== broker symbol 模糊匹配（同步自商业版 0.3.330/331） ==============
+# 不同 broker 同一品种命名不同 (XAUUSD / XAUUSDm / XAUUSD.c / XAUUSDmicro ...)。
+# EA / 配置里写通用名时, exact match 不上就在 broker 全 symbol 列表里找含该 stem 的
+# 变体: 优先 Market Watch 可见的, 同可见短名优先 (XAUUSDm 优先于 XAUUSDm.pro)。
+def _resolve_symbol_fuzzy(sym: str):
+    """返回 (resolved_symbol_or_None, matched_via)。exact 命中 → (sym, "exact")。"""
+    if not sym:
+        return None, None
+    try:
+        if mt5.symbol_info(sym) is not None:
+            return sym, "exact"
+    except Exception:
+        pass
+    try:
+        all_syms = mt5.symbols_get() or []
+        stem_upper = str(sym).upper()
+        hits = []
+        for si in all_syms:
+            name = getattr(si, "name", "") or ""
+            if name and stem_upper in name.upper():
+                hits.append((name, bool(getattr(si, "visible", False))))
+        if hits:
+            hits.sort(key=lambda x: (not x[1], len(x[0])))
+            return hits[0][0], f"fuzzy:{sym}"
+    except Exception:
+        pass
+    return None, None
+
+
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
@@ -496,9 +599,12 @@ class TradingContext:
 
     def get_status(self):
         """获取交易状态数据"""
-        symbol_info = mt5.symbol_info(self.symbol)
-        if symbol_info is None:
-            return {"error": "无法获取行情数据"}
+        # 同步自商业版 0.3.330: exact 拿不到时 fuzzy match broker 变体 (XAUUSD→XAUUSDm 等);
+        # 0.3.329: symbol_info 仍为 None 也**不再整体 early-return** —— 账户/持仓/终端
+        # 字段照常返回, 只把 market_data 标记为不可用(一个品种查不到不该屏蔽全部状态)。
+        resolved_symbol, matched_via = _resolve_symbol_fuzzy(self.symbol)
+        symbol_info = mt5.symbol_info(resolved_symbol) if resolved_symbol else None
+        broker_off = _broker_offset_sec(resolved_symbol or self.symbol)
 
         # 获取账户和终端信息
         account_info = mt5.account_info()
@@ -518,6 +624,7 @@ class TradingContext:
                     "profit": pos.profit,
                     "comment": pos.comment,
                     "time": pos.time,
+                    "time_bj": _mt5_epoch_to_bj_str(pos.time, broker_off),   # 真北京时间(券商偏移已校正)
                     "sl": pos.sl,
                     "tp": pos.tp
                 }
@@ -541,15 +648,32 @@ class TradingContext:
                 "connected": terminal_info.connected if terminal_info else False,
                 # ping_last 来自 MT5 Python API，单位是微秒；统一转成毫秒以匹配 MT5 界面显示
                 "ping": int(terminal_info.ping_last / 1000) if terminal_info else -1,
-                "trade_allowed": terminal_info.trade_allowed if terminal_info else False
+                # 同步自商业版 0.3.328: trade_allowed 交叉验证 — 终端「算法交易」开关与
+                # 账户层允许交易**都**为真才算可交易; 两个子字段分别透出便于 AI 定位哪层关了。
+                "terminal_trade_allowed": bool(terminal_info.trade_allowed) if terminal_info else False,
+                "account_trade_allowed": bool(getattr(account_info, "trade_allowed", True)) if account_info else False,
+                "trade_allowed": bool(
+                    (terminal_info.trade_allowed if terminal_info else False)
+                    and (getattr(account_info, "trade_allowed", True) if account_info else False)
+                ),
             },
-            "market_data": {
-                "symbol": self.symbol,
+            "market_data": ({
+                "symbol": resolved_symbol,
+                "configured_symbol": self.symbol,
+                "matched_via": matched_via,           # exact / fuzzy:<原名> — fuzzy 命中时 AI 可见
                 "bid": symbol_info.bid,
                 "ask": symbol_info.ask,
                 "spread": symbol_info.spread,
-                "time": _now_bj_str()
-            },
+                "time": _now_bj_str(),
+                # 券商服务器最后报价时间(已换算真北京) + 偏移小时数 — 跟 K 线时间互校用
+                "server_time": _mt5_epoch_to_bj_str(getattr(symbol_info, "time", 0), broker_off),
+                "broker_offset_hours": (broker_off / 3600.0) if broker_off is not None else None,
+            } if symbol_info is not None else {
+                "symbol": None,
+                "configured_symbol": self.symbol,
+                "error": "symbol_not_found",
+                "hint": f"当前 broker 上没找到 {self.symbol}(模糊匹配也未命中)。账户/持仓/终端字段仍可信。",
+            }),
             "strategy_state": {
                 "running": self.running,
                 "is_open_position": self.is_open_position
@@ -3860,6 +3984,66 @@ def get_all_tools() -> list[Tool]:
                 "required": ["params"],
             },
         ),
+        Tool(
+            name="record_experience",
+            description=(
+                "把某只 EA 的【经验】追加进它的经验笔记(<workspace>/strategies/<EA>.experience.md, 一只 EA 一份, "
+                "append-only 带日期)。**发现值得长期记住的东西时主动调**: 人工介入(手动平/改单、暂停交易、改参数及原因)、"
+                "运作规律(这只 EA 啥行情好/差、马丁到第几层危险、新闻前要不要停)、教训、用户偏好。"
+                "下次分析 / 做决策 / 挂载前会被读回当上下文, 让 AI 真正延续这只 EA 的操盘经验。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ea_name": {"type": "string", "description": "EA 名(可带或不带后缀); 省略则用当前/默认 EA"},
+                    "content": {"type": "string", "description": "要记的经验, 一两句话, 具体可执行(带数字/条件最好)"},
+                    "category": {"type": "string", "description": "可选分类: 人工介入 / 运作 / 教训 / 偏好 / 其他"}
+                },
+                "required": ["content"]
+            }
+        ),
+        Tool(
+            name="read_experience",
+            description=(
+                "读某只 EA 的经验笔记(历史人工介入 + 运作规律 + 教训)。**分析该 EA / 做决策 / 挂载前先读一遍**, "
+                "避免重复踩坑、延续之前的操盘经验。省略 ea_name 则读当前/默认 EA。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"ea_name": {"type": "string", "description": "EA 名; 省略则当前/默认 EA"}},
+                "required": []
+            }
+        ),
+        Tool(
+            name="get_ea_realtime_stats",
+            description=(
+                "实时算每只 EA 的 trades / pnl / max_drawdown / 开仓数。一次拉一批 EA, "
+                "内部只调一次 mt5.history_deals_get(lookback) + mt5.positions_get()。"
+                "EA spec 里 magic 建议必填(GMarket 默认 999, 可从 get_config / EA 参数拿); "
+                "symbols 用来做仓位过滤 + magic 缺失时按成交频次启发推断; load_at_sec 是 deal-filter "
+                "起点(默认 lookback 起算)。返回每只 EA 的 trades/pnl/pnl_pct/max_drawdown_pct/today_*/open_*。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "eas": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "ea_name": {"type": "string"},
+                                "magic": {"type": "integer", "description": "EA 魔术号; 缺省时按 symbols+deals 频次启发推断"},
+                                "symbols": {"type": "array", "items": {"type": "string"}, "description": "EA 交易的 symbol 列表(仓位过滤 + magic 启发)"},
+                                "load_at_sec": {"type": "integer", "description": "deal-filter 起点 unix 秒; 不传 → 用 lookback 起点"},
+                            },
+                            "required": ["ea_name"],
+                        },
+                    },
+                    "lookback_days": {"type": "integer", "minimum": 1, "maximum": 365, "default": 30},
+                },
+                "required": ["eas"],
+            },
+        ),
     ] + _trading_write_tools() + [   # 内部按 _is_trading_write_enabled / _is_trading_write_open_enabled 各自决定
         # 始终可见的诊断工具 — 用户在 chat 里说「调用 easydeal_debug_env」
         # 就能看到当前 MCP 进程里 EASYDEAL_TRADING_WRITE / EASYDEAL_TRADING_WRITE_OPEN
@@ -3875,6 +4059,283 @@ def get_all_tools() -> list[Tool]:
             inputSchema={"type": "object", "properties": {}, "required": []},
         ),
     ]
+
+
+# ============== per-EA 经验笔记（同步自商业版 1.1.14） ==============
+# 一只 EA 一份 markdown(append-only 带北京日期分节), AI 跨会话延续操盘经验:
+# 人工介入原因 / 运作规律 / 教训 / 用户偏好。配合你的 agent 定时任务可做每日自动总结。
+def _experience_path(ea_name):
+    ws = os.getenv("EASYDEAL_WORKSPACE_DIR") or os.getcwd()
+    if not ea_name:
+        return None
+    stem = os.path.basename(str(ea_name)).strip()
+    for ext in (".experience.md", ".mq5", ".ex5", ".mqh", ".set"):
+        if stem.lower().endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    if not stem:
+        return None
+    return os.path.join(ws, "strategies", stem + ".experience.md")
+
+
+def _read_experience(ea_name, max_chars=20000):
+    fp = _experience_path(ea_name)
+    if not fp or not os.path.isfile(fp):
+        return {"ok": True, "ea_name": ea_name, "content": "", "note": "该 EA 暂无经验笔记"}
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            txt = f.read()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    if len(txt) > max_chars:
+        txt = "…(已截断, 下为最近内容)…\n" + txt[-max_chars:]
+    return {"ok": True, "ea_name": ea_name, "file": fp, "content": txt}
+
+
+def _append_experience(ea_name, content, category=""):
+    fp = _experience_path(ea_name)
+    if not fp:
+        return {"ok": False, "error": "ea_name 为空"}
+    content = (content or "").strip()
+    if not content:
+        return {"ok": False, "error": "content 为空"}
+    try:
+        os.makedirs(os.path.dirname(fp), exist_ok=True)
+        stem = os.path.basename(fp)[: -len(".experience.md")]
+        existing = ""
+        if os.path.isfile(fp):
+            with open(fp, "r", encoding="utf-8") as f:
+                existing = f.read()
+        out = existing
+        if not out.strip():
+            out = ("# " + stem + " 经验笔记\n"
+                   "> AI 主动记录 + 每日总结(可由你的 agent 定时调用)。append-only, 最新在末尾。\n")
+        today = _bj_date_str()
+        if ("## " + today) not in out:
+            out = out.rstrip() + "\n\n## " + today + "\n"
+        tag = ("[" + category.strip() + "] ") if (category and category.strip()) else ""
+        out = out.rstrip() + "\n- " + _now_bj_str("%H:%M") + " " + tag + content + "\n"
+        if len(out) > 80000:
+            out = "# " + stem + " 经验笔记 (已截断, 留最近)\n" + out[-78000:]
+        tmp = fp + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(out)
+        os.replace(tmp, fp)
+        return {"ok": True, "file": fp, "appended": tag + content, "bytes": len(out)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ============== EA 实时成绩单（同步自商业版 0.3.341 口径） ==============
+def _get_ea_realtime_stats_tool(args: dict) -> list[TextContent]:
+    """实时算每只 EA 的成绩单: 一次 history_deals_get(lookback) + positions_get,
+    按 magic(或 symbols 兜底)归属后算 trades/pnl/回撤/今日/在仓。
+    回撤口径与商业版 server 对齐: entry in (1,2,3) 算平仓 leg;
+    pnl_pct 分母用反推的 anchor 余额; max_dd_pct 分母用回撤发生瞬间的 peak 余额快照。"""
+    eas = args.get("eas") or []
+    if not isinstance(eas, list) or not eas:
+        return [TextContent(type="text", text=json.dumps(
+            {"ok": False, "error": "eas 必填且非空"}, ensure_ascii=False))]
+    try:
+        lookback_days = max(1, min(365, int(args.get("lookback_days") or 30)))
+    except Exception:
+        lookback_days = 30
+
+    try:
+        if not mt5.terminal_info():
+            return [TextContent(type="text", text=json.dumps(
+                {"ok": False, "error": "MT5 未连接 — 本工具复用当前进程的 MT5 连接, 请先确保 MT5 已启动并登录"},
+                ensure_ascii=False))]
+    except Exception as e:
+        return [TextContent(type="text", text=json.dumps(
+            {"ok": False, "error": f"mt5 not available: {e}"}, ensure_ascii=False))]
+
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    since = now - _dt.timedelta(days=lookback_days)
+    deals_raw = mt5.history_deals_get(since, now) or []
+    positions_raw = mt5.positions_get() or []
+    info = mt5.account_info()
+    balance = float(info.balance) if info else 0.0
+    equity = float(info.equity) if info else 0.0
+    today_start_sec = int(_dt.datetime(now.year, now.month, now.day,
+                                       tzinfo=_dt.timezone.utc).timestamp())
+
+    deals = []
+    for d in deals_raw:
+        deals.append({
+            "ticket": d.ticket,
+            "magic": int(d.magic or 0),
+            "symbol": d.symbol or "",
+            "volume": float(d.volume or 0),
+            "profit": float(d.profit or 0),
+            "swap": float(d.swap or 0),
+            "commission": float(d.commission or 0),
+            "time": int(d.time or 0),
+            "type": int(d.type or 0),
+            "entry": int(d.entry or 0),   # 0=in, 1=out, 2=inout, 3=out_by
+        })
+    positions = []
+    for p in positions_raw:
+        positions.append({
+            "ticket": p.ticket,
+            "magic": int(p.magic or 0),
+            "symbol": p.symbol or "",
+            "volume": float(p.volume or 0),
+            "profit": float(p.profit or 0),
+            "swap": float(p.swap or 0),
+        })
+
+    fallback_start_sec = int(since.timestamp())
+
+    out_items = []
+    for spec in eas:
+        if not isinstance(spec, dict):
+            continue
+        ea_name = (spec.get("ea_name") or "").strip()
+        if not ea_name:
+            continue
+        magic = spec.get("magic")
+        if magic is not None:
+            try:
+                magic = int(magic)
+            except Exception:
+                magic = None
+        symbols = spec.get("symbols") or []
+        syms_lc = set(str(s).lower() for s in symbols if s)
+        load_at_sec = spec.get("load_at_sec")
+        try:
+            load_at_sec = int(load_at_sec) if load_at_sec else 0
+        except Exception:
+            load_at_sec = 0
+        if not load_at_sec:
+            load_at_sec = fallback_start_sec
+
+        magic_resolved_by = "input" if magic is not None else None
+
+        # Magic 缺失时: 在 lookback 内、属于该 EA symbol 且 magic!=0 的 deals
+        # 里挑频次最高的 magic 当兜底。
+        if magic is None and syms_lc:
+            counts = {}
+            for d in deals:
+                if d["magic"] == 0:
+                    continue
+                if d["time"] < load_at_sec:
+                    continue
+                if d["symbol"].lower() not in syms_lc:
+                    continue
+                counts[d["magic"]] = counts.get(d["magic"], 0) + 1
+            if counts:
+                magic = max(counts, key=counts.get)
+                magic_resolved_by = "heuristic"
+
+        effective_since_sec = spec.get("effective_since_sec")
+        try:
+            effective_since_sec = int(effective_since_sec) if effective_since_sec else 0
+        except Exception:
+            effective_since_sec = 0
+
+        my_deals = []
+        if magic is not None:
+            for d in deals:
+                if d["magic"] != magic:
+                    continue
+                if effective_since_sec and d["time"] < effective_since_sec:
+                    continue
+                my_deals.append(d)
+        elif syms_lc:
+            magic_resolved_by = "symbol_only"
+            for d in deals:
+                if d["symbol"].lower() not in syms_lc:
+                    continue
+                if effective_since_sec and d["time"] < effective_since_sec:
+                    continue
+                my_deals.append(d)
+
+        my_deals.sort(key=lambda d: d["time"])
+
+        trades = 0
+        pnl = 0.0
+        running_pnl = 0.0
+        peak_pnl = 0.0
+        max_dd_dollar = 0.0
+        peak_pnl_at_max_dd = 0.0   # 锁定 max_dd 发生瞬间的 peak, 当分母用
+        today_trades = 0
+        today_pnl = 0.0
+        last_deal_at = None
+        # entry in (1,2,3) 都算平仓 leg: 1=OUT, 2=INOUT(reverse), 3=OUT_BY
+        for d in my_deals:
+            realized = d["profit"] + d["swap"] + d["commission"]
+            if d["entry"] in (1, 2, 3):
+                trades += 1
+            pnl += realized
+            running_pnl += realized
+            if running_pnl > peak_pnl:
+                peak_pnl = running_pnl
+            dd = peak_pnl - running_pnl
+            if dd > max_dd_dollar:
+                max_dd_dollar = dd
+                peak_pnl_at_max_dd = peak_pnl
+            if d["time"] >= today_start_sec:
+                if d["entry"] in (1, 2, 3):
+                    today_trades += 1
+                today_pnl += realized
+            last_deal_at = d["time"]
+
+        my_positions = []
+        if magic is not None:
+            for p in positions:
+                if p["magic"] != magic:
+                    continue
+                if syms_lc and p["symbol"].lower() not in syms_lc:
+                    continue
+                my_positions.append(p)
+        elif syms_lc:
+            for p in positions:
+                if p["symbol"].lower() in syms_lc:
+                    my_positions.append(p)
+        open_count = len(my_positions)
+        open_profit = sum(p["profit"] + p["swap"] for p in my_positions)
+
+        # pnl_pct 分母 = 反推 anchor 时刻 balance; max_dd_pct 分母 = dd 瞬间 peak 余额快照
+        # (不被后续创新高稀释, 也不随当前浮动盈亏漂移)。
+        bal_anchor_est = balance - pnl
+        peak_balance_at_max_dd = bal_anchor_est + peak_pnl_at_max_dd
+        pnl_pct = (pnl / bal_anchor_est) if bal_anchor_est > 0 else 0.0
+        max_dd_pct = (max_dd_dollar / peak_balance_at_max_dd) if peak_balance_at_max_dd > 0 else 0.0
+
+        out_items.append({
+            "ea_name": ea_name,
+            "magic": magic,
+            "magic_resolved_by": magic_resolved_by,    # input / heuristic / symbol_only / None
+            "trades": trades,
+            "pnl": round(pnl, 2),
+            "pnl_pct": round(pnl_pct, 6),
+            "max_drawdown_dollar": round(max_dd_dollar, 2),
+            "max_drawdown_pct": round(max_dd_pct, 6),          # decimal fraction (0.297 = 29.7%)
+            "max_drawdown_percent": round(max_dd_pct * 100, 2),  # AI 友好版, 直接百分比
+            "today_trades": today_trades,
+            "today_pnl": round(today_pnl, 2),
+            "open_positions": open_count,
+            "open_profit": round(open_profit, 2),
+            "last_deal_at": last_deal_at,
+            "load_at_sec": load_at_sec,
+            "effective_since_sec": effective_since_sec or None,
+        })
+
+    return [TextContent(type="text", text=json.dumps({
+        "ok": True,
+        "ts": int(now.timestamp()),
+        "lookback_days": lookback_days,
+        "account": {
+            "balance": balance,
+            "equity": equity,
+            "currency": info.currency if info else None,
+        } if info else None,
+        "total_deals_in_lookback": len(deals),
+        "total_positions_open": len(positions),
+        "items": out_items,
+    }, ensure_ascii=False, indent=2))]
 
 
 def _is_trading_write_enabled() -> bool:
@@ -4429,15 +4890,27 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(status, ensure_ascii=False, indent=2))]
 
         if name == "get_market_info":
-            symbol_info = mt5.symbol_info(strategy.symbol)
+            # 同步自商业版 0.3.331: symbol 支持 fuzzy match (XAUUSD→XAUUSDm 等 broker 变体) +
+            # 返回券商服务器时间(已校正成真北京)与偏移量, 跟 get_klines 的 bar 时间互校。
+            req_sym = str(arguments.get("symbol") or strategy.symbol)
+            msym, matched_via = _resolve_symbol_fuzzy(req_sym)
+            symbol_info = mt5.symbol_info(msym) if msym else None
             if symbol_info is None:
-                return [TextContent(type="text", text=json.dumps({"error": "market info unavailable"}, ensure_ascii=False))]
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": "symbol_not_found", "symbol": req_sym,
+                     "hint": f"broker 上没找到 {req_sym}, 模糊匹配也未命中 — 该 broker 可能不支持此品种"},
+                    ensure_ascii=False))]
+            off = _broker_offset_sec(msym)
             market_info = {
-                "symbol": strategy.symbol,
+                "symbol": msym,
+                "requested_symbol": req_sym,
+                "matched_via": matched_via,
                 "bid": symbol_info.bid,
                 "ask": symbol_info.ask,
                 "spread": symbol_info.spread,
-                "time": _now_bj_str()
+                "time": _now_bj_str(),
+                "server_time": _mt5_epoch_to_bj_str(getattr(symbol_info, "time", 0), off),
+                "broker_offset_hours": (off / 3600.0) if off is not None else None,
             }
             return [TextContent(type="text", text=json.dumps(market_info, ensure_ascii=False, indent=2))]
 
@@ -4459,15 +4932,28 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             count = max(1, min(count, 500))
             include_current = bool(arguments.get("include_current", False))
             start_pos = 0 if include_current else 1
-            rates = mt5.copy_rates_from_pos(strategy.symbol, tf_map[tf_str], start_pos, count)
+            # 同步自商业版 0.3.331 + 1.1.1: symbol fuzzy match + bar 时间按券商偏移
+            # 校正成真北京时间(老实现用裸 fromtimestamp 按本机 TZ 解释 → 「未来 K 线」bug)。
+            req_sym = str(arguments.get("symbol") or strategy.symbol)
+            ksym, matched_via = _resolve_symbol_fuzzy(req_sym)
+            if not ksym:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": "symbol_not_found", "symbol": req_sym, "timeframe": tf_str,
+                     "hint": f"broker 上没找到 {req_sym}, 模糊匹配也未命中"},
+                    ensure_ascii=False))]
+            rates = mt5.copy_rates_from_pos(ksym, tf_map[tf_str], start_pos, count)
             if rates is None or len(rates) == 0:
                 return [TextContent(type="text", text=json.dumps(
-                    {"error": "no kline data", "symbol": strategy.symbol, "timeframe": tf_str},
+                    {"error": "no kline data", "symbol": ksym, "timeframe": tf_str},
                     ensure_ascii=False))]
+            off = _broker_offset_sec(ksym)
             bars = []
-            for r in rates:
+            total = len(rates)
+            for i, r in enumerate(rates):
                 bars.append({
-                    "time": datetime.fromtimestamp(int(r["time"])).strftime("%Y-%m-%d %H:%M:%S"),
+                    "time": _mt5_epoch_to_bj_str(int(r["time"]), off),
+                    # closed=False 仅最后一根且 include_current=True (正在走的当前 bar)
+                    "closed": not (include_current and i == total - 1),
                     "open": float(r["open"]),
                     "high": float(r["high"]),
                     "low": float(r["low"]),
@@ -4477,10 +4963,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     "real_volume": int(r["real_volume"]),
                 })
             result = {
-                "symbol": strategy.symbol,
+                "symbol": ksym,
+                "requested_symbol": req_sym,
+                "matched_via": matched_via,
                 "timeframe": tf_str,
                 "count": len(bars),
                 "include_current": include_current,
+                "time_note": "bar.time 已按券商服务器偏移校正为北京时间",
+                "broker_offset_hours": (off / 3600.0) if off is not None else None,
                 "bars": bars,
             }
             return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
@@ -4492,6 +4982,19 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if name == "get_strategy_documentation":
             ok, doc = _get_or_generate_strategy_doc(strategy, arguments)
             return [TextContent(type="text", text=doc)]
+
+        if name == "record_experience":
+            ea = arguments.get("ea_name") or (strategy.symbol and getattr(strategy, "ea_name", None)) or "GMarket"
+            res = _append_experience(ea, arguments.get("content"), arguments.get("category") or "")
+            return [TextContent(type="text", text=json.dumps(res, ensure_ascii=False, indent=2))]
+
+        if name == "read_experience":
+            ea = arguments.get("ea_name") or (strategy.symbol and getattr(strategy, "ea_name", None)) or "GMarket"
+            res = _read_experience(ea)
+            return [TextContent(type="text", text=json.dumps(res, ensure_ascii=False, indent=2))]
+
+        if name == "get_ea_realtime_stats":
+            return _get_ea_realtime_stats_tool(arguments)
 
         if name == "get_profit_history":
             start_time = arguments.get("start_time")

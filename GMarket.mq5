@@ -15,9 +15,12 @@
 
 #include <Trade/Trade.mqh>
 
+//@easydeal symbol=XAUUSD magic=999
+// ↑ EasyDeal 用这行声明本 EA 的默认品种/魔术号(纯注释,不影响编译/运行)。
+//   品种用通用 XAUUSD,EasyDeal 会按 broker 实际符号(XAUUSDc/XAUUSDm 等)模糊匹配。
 
 // 输入参数 (默认值；运行时可被 MQL5/Files/GMarket_config.set 覆盖)
-input double InpFirstLots = 0.03;              // 起手大小
+input double InpFirstLots = 0.02;              // 起手大小
 input double InpStep = 0.8;                    // 梯级（百分比）
 input double InpMartinInterval = 1.2;          // 马丁最小矩离（百分比）
 input double InpFilter = 0.1;                  // 虑波器（百分比）
@@ -30,7 +33,7 @@ input double InpMaxLoss = 3000;                // 最大浮亏
 input int    InpMaxMartinLevel = 3;            // 最大马丁层数
 input double InpMaxAtrPct = 1.5;               // 允许马丁的最大ATR 百分比
 input double InpMaxBollDeviation = 2.0;        // 允许马丁的最大布林带偏离
-input double InpMartinBreakevenProfit = 0.0;   // 马丁零损保护缓冲金额，<=0 关闭
+input double InpMartinBreakevenProfit = 30;    // 马丁零损保护缓冲金额，<=0 关闭
 input bool   InpLogicalBreakeven = true;       // 逻辑零损保护（不修改订单）
 input bool   InpBreakevenResetLadder = true;   // 零损时平掉爬梯方向base并重开
 input bool   InpNewsFilterEnabled = true;      // 允许马丁的新闻过滤开关
@@ -101,8 +104,11 @@ bool running = true;
 string martinPauseReason = "";
 datetime lastTradeActionTime = 0;
 datetime lastAutoReloadTime = 0;
-const int AUTO_RELOAD_COOLDOWN = 2;
+const int AUTO_RELOAD_COOLDOWN = 5;     // 2→5: 拉长 AutoReload 抑制窗口，覆盖 EA 自身 ladder/martin 多步操作(平仓重试 + 开base→Sleep500→开martin)的过渡期，避免重读把 followType/seek 冲掉，造成"爬梯/开马丁了却显示无方向(followType=-1)"的假象
 const int AUTO_RELOAD_MIN_INTERVAL = 2;
+long lastCloseAttemptTicket = -1;       // 平仓去重：上次尝试平仓的 ticket
+datetime lastCloseAttemptTime = 0;      // 及其时间
+const int CLOSE_DEDUP_WINDOW = 2;       // 同一 ticket 在该秒数内不重复发平仓请求，避免上一次平仓还在途时再发触发 #10039「Order to close already exists」
 datetime nextRecoverAttemptTime = 0;
 const int RECOVER_MIN_INTERVAL = 5;
 datetime nextLadderResetAttemptTime = 0;
@@ -317,6 +323,7 @@ int MartinBackoffRemaining(datetime lastFail, int failCount)
 
 long SendMarketOrder(ENUM_ORDER_TYPE orderType, double volume, string comment)
 {
+
    MqlTradeRequest request;
    MqlTradeResult result;
    ZeroMemory(request);
@@ -359,6 +366,15 @@ bool ClosePositionByTicket(long ticket)
    if (!SelectPositionByTicket(ticket)){
       return false;
    }
+
+   // 平仓竞态守卫：同一 ticket 上一次平仓请求可能仍在途（持仓还在 = 还没成交），
+   // 窗口内不重复发，避免 #10039「Order to close already exists」/ #10036 风暴。
+   datetime nowClose = TimeCurrent();
+   if (ticket == lastCloseAttemptTicket && (nowClose - lastCloseAttemptTime) < CLOSE_DEDUP_WINDOW){
+      return false;
+   }
+   lastCloseAttemptTicket = ticket;
+   lastCloseAttemptTime = nowClose;
 
    int type = (int)PositionGetInteger(POSITION_TYPE);
    double volume = PositionGetDouble(POSITION_VOLUME);
@@ -585,9 +601,13 @@ bool ResetLadderBase()
       long ladderTicket = lastBuyOrderTick;
       if (ladderTicket > 0){
          if (!ClosePositionByTicket(ladderTicket)){
-            printfPro("Reset ladder buy base failed #" + GetLastError());
-            nextLadderResetAttemptTime = now + LADDER_RESET_MIN_INTERVAL;
-            return false;
+            // 缺脚根因修复：持仓若已不存在(被零损/手动平掉, err 4753)，当作已平、跳过平仓直接重开，避免反复失败死循环
+            if (SelectPositionByTicket(ladderTicket)){
+               printfPro("Reset ladder buy base failed #" + GetLastError());
+               nextLadderResetAttemptTime = now + LADDER_RESET_MIN_INTERVAL;
+               return false;
+            }
+            printfPro("Reset ladder buy base: 持仓已不存在，跳过平仓直接重开");
          }
       }
       long newTicket = SendMarketOrder(ORDER_TYPE_BUY, firstLots, "Buy base reset");
@@ -602,9 +622,13 @@ bool ResetLadderBase()
       long ladderTicket = lastSellOrderTick;
       if (ladderTicket > 0){
          if (!ClosePositionByTicket(ladderTicket)){
-            printfPro("Reset ladder sell base failed #" + GetLastError());
-            nextLadderResetAttemptTime = now + LADDER_RESET_MIN_INTERVAL;
-            return false;
+            // 缺脚根因修复：持仓若已不存在(被零损/手动平掉, err 4753)，当作已平、跳过平仓直接重开，避免反复失败死循环
+            if (SelectPositionByTicket(ladderTicket)){
+               printfPro("Reset ladder sell base failed #" + GetLastError());
+               nextLadderResetAttemptTime = now + LADDER_RESET_MIN_INTERVAL;
+               return false;
+            }
+            printfPro("Reset ladder sell base: 持仓已不存在，跳过平仓直接重开");
          }
       }
       long newTicket = SendMarketOrder(ORDER_TYPE_SELL, firstLots, "Sell base reset");
@@ -1074,8 +1098,8 @@ void DumpInputsRuntime()
     json += "  \"updated_at\": \"" + ts + "\",\n";
     json += "  \"config_applied_at\": \"" + cfgTs + "\",\n";
     json += "  \"magic\": " + IntegerToString(MAGIC_NUMBER) + ",\n";
-    json += "  \"magic_number\": " + IntegerToString(MAGIC_NUMBER) + ",\n";
     json += "  \"ts\": " + IntegerToString((int)TimeCurrent()) + ",\n";
+    json += "  \"magic_number\": " + IntegerToString(MAGIC_NUMBER) + ",\n";
     json += "  \"params\": {\n";
     json += "    \"InpFirstLots\": "             + DoubleToString(firstLots, 4) + ",\n";
     json += "    \"InpStep\": "                  + DoubleToString(step, 4) + ",\n";
@@ -1150,11 +1174,11 @@ int OnInit()
 void OnTimer()
   {
     if (ReloadRuntimeConfig(false)){
-       DumpInputsRuntime();
        UpdateEAStatus();
        UpdateGUI();
        printfPro("参数已热更新");
     }
+    DumpInputsRuntime();  // 心跳：每个 timer tick 都刷新 runtime.json 的 updated_at，让客户端知道 EA 还活着
     if (CheckReloadTrigger()){
        printfPro("Reload trigger detected: forcing chart reinit");
        ChartSetSymbolPeriod(0, _Symbol, _Period);
@@ -1861,6 +1885,7 @@ void CheckAddAndTakeProfitConditions() {
          if (martinLots <= 0){
             martinLots = firstLots * 2;
          }
+         Sleep(500); // broker anti-scalping: delay between sell base and sell martin (fixes 5/7 22x reject loop)
          long newMartinTicket = SendMarketOrder(ORDER_TYPE_SELL, martinLots, "Sell martin");
          if (newMartinTicket != -1){
             if (martinOrderCount >= ArraySize(martinOrders)){
@@ -1995,6 +2020,7 @@ void CheckAddAndTakeProfitConditions() {
          if (martinLots2 <= 0){
             martinLots2 = firstLots * 2;
          }
+         Sleep(500); // broker anti-scalping: delay between buy base and buy martin (fixes 5/7 22x reject loop)
          long newMartinTicket2 = SendMarketOrder(ORDER_TYPE_BUY, martinLots2, "Buy martin");
          if (newMartinTicket2 != -1){
             if (martinOrderCount >= ArraySize(martinOrders)){
