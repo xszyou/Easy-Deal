@@ -1012,7 +1012,9 @@ bool ApplyRuntimeOverride(string key, string val)
 // Returns true if any overrides were applied.
 bool ReloadRuntimeConfig(bool forceApply)
   {
-    string filename = "GMarket_config.set";
+    // 协议文件名按 EA 程序名拼，不写死 —— fork 改名(如 GMarket2.ex5)也能各用各的，
+    // 跟 MCP 端 _resolve_ea_filename(按 .mq5/.ex5 名)对齐。
+    string filename = MQLInfoString(MQL5_PROGRAM_NAME) + "_config.set";
     if (!FileIsExist(filename)) return false;
 
     int fh = FileOpen(filename, FILE_READ | FILE_TXT | FILE_ANSI);
@@ -1056,7 +1058,7 @@ bool ReloadRuntimeConfig(bool forceApply)
 // a chart reinit so OnInit fires and picks up a freshly compiled .ex5.
 bool CheckReloadTrigger()
   {
-    string filename = "GMarket_reload.trigger";
+    string filename = MQLInfoString(MQL5_PROGRAM_NAME) + "_reload.trigger";
     if (!FileIsExist(filename)) return false;
     int fh = FileOpen(filename, FILE_READ | FILE_TXT | FILE_ANSI);
     if (fh == INVALID_HANDLE) return false;
@@ -1082,7 +1084,7 @@ bool CheckReloadTrigger()
 // so MCP can read the true runtime values (post-override).
 void DumpInputsRuntime()
   {
-    string filename = "GMarket_runtime.json";
+    string filename = MQLInfoString(MQL5_PROGRAM_NAME) + "_runtime.json";
     int fh = FileOpen(filename, FILE_WRITE | FILE_TXT | FILE_ANSI);
     if (fh == INVALID_HANDLE){
        PrintFormat("DumpInputsRuntime: FileOpen failed, err=%d", GetLastError());
@@ -1093,7 +1095,7 @@ void DumpInputsRuntime()
                     ? TimeToString(g_lastConfigApplied, TIME_DATE | TIME_SECONDS)
                     : "");
     string json = "{\n";
-    json += "  \"ea_name\": \"GMarket\",\n";
+    json += "  \"ea_name\": \"" + MQLInfoString(MQL5_PROGRAM_NAME) + "\",\n";
     json += "  \"symbol\": \"" + _Symbol + "\",\n";
     json += "  \"updated_at\": \"" + ts + "\",\n";
     json += "  \"config_applied_at\": \"" + cfgTs + "\",\n";

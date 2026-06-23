@@ -25,6 +25,205 @@ import MetaTrader5 as mt5
 import pytz
 from flask import Flask, jsonify, request, Response
 
+
+# ============== MT5 启动/绑定健壮性 helper（从商业版同步：便携初始化 + 防误拉默认 MT5）==============
+# 根因都来自真实用户现场：①SDK initialize(path=exe) 在终端没在跑时会自动拉起它，
+# 但不带 portable 会落到 %APPDATA% 默认档案（没登录），冒出第二个空实例；
+# ②没配实例路径时裸 initialize() 会拉起「默认安装」的 MT5；③admin/普通权限错配时
+# psutil 拿不到 exe path。这组 helper 统一收口，单实例（EASYDEAL_MT5_INSTALL_DIR）即可用。
+
+def _ezd_terminal_is_running(install_dir: str) -> bool:
+    """install_dir 下的 terminal64.exe 进程在不在跑。不在跑就别 initialize（SDK 会自动拉起）。"""
+    if not install_dir:
+        return True   # 不验证，交给 SDK
+    try:
+        import psutil
+    except Exception:
+        return True   # psutil 不可用 → 兜底放行
+    try:
+        norm_install = os.path.normpath(install_dir).lower()
+        matched_with_path = False
+        unknown_count = 0           # admin/UIPI 拿不到 exe path 的 terminal64.exe
+        for p in psutil.process_iter(['name', 'exe']):
+            try:
+                name = (p.info.get('name') or '').lower()
+                if name not in ('terminal64.exe', 'terminal.exe'):
+                    continue
+                exe = p.info.get('exe') or ''
+                if not exe:
+                    # psutil 拿不到 exe（admin 模式跑本程序 + MT5 用户权限，AccessDenied
+                    # 让 .exe 字段返空）→ 记 unknown，fallback 时用。
+                    unknown_count += 1
+                    continue
+                exe_dir = os.path.dirname(os.path.normpath(exe)).lower()
+                if exe_dir == norm_install:
+                    matched_with_path = True
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                unknown_count += 1
+                continue
+        # fallback：精确匹配没找到，但 install_dir 真有 terminal64.exe + 系统里有
+        # 「拿不到 exe path」的 terminal64.exe → 大概率就是它（跨提权场景）。
+        # false-positive「误显运行中」远好于 false-negative「在跑显已停止」。
+        if not matched_with_path and unknown_count > 0:
+            try:
+                if (os.path.isfile(os.path.join(install_dir, "terminal64.exe"))
+                        or os.path.isfile(os.path.join(install_dir, "terminal.exe"))):
+                    return True
+            except Exception:
+                pass
+    except Exception:
+        return True
+    return False
+
+
+def _any_mt5_running() -> bool:
+    """系统里有没有任意 MT5 终端在跑。无 install_dir（没配实例）时用：有在跑的 →
+    path-less initialize 可 attach；一个都没有 → 跳过，否则裸 initialize() 会拉起
+    「默认安装」的 MT5（落 %APPDATA% 默认档案、没登录）。psutil 拿不到 → 宁可返 False。"""
+    try:
+        import psutil
+    except Exception:
+        return False
+    try:
+        for p in psutil.process_iter(['name']):
+            try:
+                if (p.info.get('name') or '').lower() in ('terminal64.exe', 'terminal.exe'):
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:
+        return False
+    return False
+
+
+def _mt5_killed_recently(install_dir: str, grace_sec: float = 30.0) -> bool:
+    """客户端点「关闭」该实例后会写 kill-flag(mt5-killed-<md5>.flag)。grace_sec 内
+    视为「刚关」→ 不 init（防 psutil race：关闭瞬间进程还没死透，psutil 仍报 running
+    → init 此刻进程已死 → SDK 又拉起新的）。需 EASYDEAL_DATA_DIR + 上层写 flag，
+    纯 MCP 单跑时 flag 不存在 → 恒返 False（无副作用）。"""
+    import hashlib as _h
+    import time as _t
+    data_dir = os.getenv("EASYDEAL_DATA_DIR")
+    if not data_dir:
+        return False
+    try:
+        h = _h.md5(str(install_dir or "").lower().encode("utf-8")).hexdigest()[:12]
+        fp = os.path.join(data_dir, f"mt5-killed-{h}.flag")
+        if not os.path.isfile(fp):
+            return False
+        return (_t.time() - os.path.getmtime(fp)) < grace_sec
+    except Exception:
+        return False
+
+
+def _detect_portable_mode(install_dir: str) -> bool:
+    """install_dir 是不是 portable copy（自包含副本）= 同时含 MQL5/ + Config/ + Profiles/。
+    portable 判定决定 initialize 自动拉起时落便携目录还是 %APPDATA% 默认档案。"""
+    try:
+        return all(
+            os.path.isdir(os.path.join(install_dir, d))
+            for d in ("MQL5", "Config", "Profiles")
+        )
+    except Exception:
+        return False
+
+
+def _mt5_init(path=None, **extra):
+    """统一 mt5.initialize 入口 —— 自动按 install_dir 检测 portable 并传入。
+    SDK 的 initialize(path=exe) 在终端没在跑时会自动拉起它；不带 portable 会落到
+    %APPDATA%\\MetaQuotes\\Terminal\\<hash> 默认档案（没登录）。按 dirname(path) 检测
+    portable，自动拉起即走便携目录、带登录。已显式传 portable 的尊重原值。"""
+    try:
+        if path and "portable" not in extra:
+            extra["portable"] = _detect_portable_mode(os.path.dirname(path))
+    except Exception:
+        pass
+    if path is not None:
+        return mt5.initialize(path=path, **extra)
+    return mt5.initialize(**extra)
+
+
+def _ensure_webrequest_whitelist(install_dir: str, urls=None) -> None:
+    """把指定域名写进 MT5 的 WebRequest 白名单(config/common.ini 的 [Experts]
+    WebRequest=1 + WebRequestUrl)，让 EA 能 WebRequest 直传。挂载靠 taskkill 杀 MT5 时
+    GUI 手动加的白名单会丢，写进文件就持久。幂等 + 只动这两个 key、合并保留其它 URL。
+
+    开源版不写死任何域名：urls 不传则读环境变量 EASYDEAL_WEBREQUEST_URLS（逗号分隔），
+    都没有 → 直接 no-op。"""
+    if urls is None:
+        env = os.getenv("EASYDEAL_WEBREQUEST_URLS", "").strip()
+        urls = [u.strip() for u in env.replace(";", ",").split(",") if u.strip()]
+    if not urls:
+        return   # 没配置要加的域名 → 不动 common.ini
+    try:
+        ini = os.path.join(install_dir, "config", "common.ini")
+        if not os.path.isfile(ini) and os.path.isfile(os.path.join(install_dir, "Config", "common.ini")):
+            ini = os.path.join(install_dir, "Config", "common.ini")
+        try:
+            with open(ini, "r", encoding="utf-16-le") as f:
+                content = f.read()
+            enc = "utf-16-le"
+        except (FileNotFoundError, UnicodeError):
+            try:
+                with open(ini, "r", encoding="utf-8") as f:
+                    content = f.read()
+                enc = "utf-8"
+            except FileNotFoundError:
+                content = ""; enc = "utf-16-le"
+        lines = content.splitlines() if content else []
+        sec = "[Experts]"
+        s0, s1 = -1, len(lines)
+        for i, ln in enumerate(lines):
+            if ln.strip().lstrip("﻿") == sec:
+                s0 = i
+                for j in range(i + 1, len(lines)):
+                    t = lines[j].strip()
+                    if t.startswith("[") and t.endswith("]"):
+                        s1 = j; break
+                break
+
+        def _cur(key):
+            rng = range(s0 + 1, s1) if s0 >= 0 else range(0)
+            for k in rng:
+                st = lines[k].strip()
+                if "=" in st and st.split("=", 1)[0].strip() == key:
+                    return st.split("=", 1)[1].strip()
+            return ""
+
+        if s0 >= 0 and _cur("WebRequest") == "1" and all(u.split("//")[-1] in _cur("WebRequestUrl") for u in urls):
+            return   # 已满足 → 幂等不写
+        merged = [u.strip() for u in _cur("WebRequestUrl").replace(";", ",").split(",") if u.strip()]
+        for u in urls:
+            host = u.split("//")[-1]
+            if not any(host in m for m in merged):
+                merged.append(u)
+        desired = {"WebRequest": "1", "WebRequestUrl": ",".join(dict.fromkeys(merged))}
+        if s0 < 0:
+            new_lines = lines + ([""] if lines and lines[-1] else []) + [sec] + [f"{k}={v}" for k, v in desired.items()] + [""]
+        else:
+            sl = lines[s0:s1]; seen = set()
+            for i, ln in enumerate(sl):
+                if i == 0:
+                    continue
+                st = ln.strip()
+                if "=" in st:
+                    key = st.split("=", 1)[0].strip()
+                    if key in desired:
+                        sl[i] = f"{key}={desired[key]}"; seen.add(key)
+            for k, v in desired.items():
+                if k not in seen:
+                    sl.append(f"{k}={v}")
+            new_lines = lines[:s0] + sl + lines[s1:]
+        new_content = "\n".join(new_lines) + "\n"
+        os.makedirs(os.path.dirname(ini), exist_ok=True)
+        with open(ini, "w", encoding=enc) as f:
+            f.write(new_content)
+        logging.info(f"[webreq] WebRequest 白名单已写入 {ini} (urls={desired['WebRequestUrl']})")
+    except Exception as e:
+        logging.warning(f"[webreq] ensure whitelist failed: {e}")
+
+
 # ============== 时区 ==============
 # 全系统对外展示统一用北京时区。MT5 历史查询的边界（start/end）按 broker
 # 服务器 TZ 决定，但用户看到的所有「时间字符串」都是 Asia/Shanghai。
@@ -285,7 +484,26 @@ class TradingContext:
                     init_kwargs["path"] = p
                     logging.info(f"MT5 initialize 锁定到 {p}")
                     break
-        if not mt5.initialize(**init_kwargs):
+        # 防误拉/误连守卫（从商业版同步）：
+        # ① 刚被用户关闭(kill-flag 新鲜) → 跳过，防 psutil race 把死进程又拉起；
+        # ② install_dir 下 MT5 没在跑 → 跳过 initialize（SDK 会自动拉起），等用户启动；
+        # ③ 没解析到实例路径且系统无 MT5 在跑 → 跳过，避免裸 initialize() 拉起默认安装的 MT5。
+        if install_dir and _mt5_killed_recently(install_dir):
+            logging.warning(f"MT5 (install={install_dir}) 刚被关闭(kill-flag 新鲜) — 跳过 initialize。")
+            self.running = False
+            return
+        if install_dir and not _ezd_terminal_is_running(install_dir):
+            logging.warning(f"MT5 (install={install_dir}) 未运行 — 跳过 initialize，等用户手动启动 MT5。")
+            self.running = False
+            return
+        if not init_kwargs.get("path") and not _any_mt5_running():
+            logging.warning("未配置 MT5 实例路径且系统无 MT5 在跑 — 跳过 initialize，避免拉起默认安装的 MT5。")
+            self.running = False
+            return
+        # 启动前确保 WebRequest 白名单（需 EASYDEAL_WEBREQUEST_URLS 配置，否则 no-op）。
+        if install_dir:
+            _ensure_webrequest_whitelist(install_dir)
+        if not _mt5_init(**init_kwargs):
             err = mt5.last_error() if hasattr(mt5, "last_error") else "unknown"
             logging.error(f"MT5初始化失败 path={init_kwargs.get('path')} err={err}")
             print(f"MT5初始化失败 path={init_kwargs.get('path')} err={err}")
@@ -329,7 +547,7 @@ class TradingContext:
                     except Exception:
                         pass
                     _time.sleep(0.5)
-                    if not mt5.initialize(**init_kwargs):
+                    if not _mt5_init(**init_kwargs):
                         logging.error(f"MT5 重试 init 失败：{mt5.last_error()}")
                         # 这里不能 self.running=False — 重试 init 失败可能是
                         # 暂时的，让 SDK 当前的连接（虽然可能绑错）保持。后面的
@@ -1851,7 +2069,7 @@ def _rebind_mt5(new_install_dir: str) -> bool:
         mt5.shutdown()
     except Exception:
         pass
-    if not mt5.initialize(**init_kwargs):
+    if not _mt5_init(**init_kwargs):
         logging.error(f"[settings reload] mt5.initialize 失败 path={init_kwargs['path']} err={mt5.last_error()}")
         return False
     expected = _norm_install_dir(init_kwargs["path"])
@@ -1871,7 +2089,7 @@ def _rebind_mt5(new_install_dir: str) -> bool:
             except Exception:
                 pass
             _time.sleep(0.5)
-            if not mt5.initialize(**init_kwargs):
+            if not _mt5_init(**init_kwargs):
                 logging.error(f"[settings reload] retry init 失败：{mt5.last_error()}")
                 return False
     logging.warning(
