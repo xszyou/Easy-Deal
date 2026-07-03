@@ -9,7 +9,7 @@
 
 这种架构确保了交易的稳定性（EA 独立运行，不受 Python 端影响），同时赋予了系统强大的 AI 扩展能力（通过 MCP 进行自然语言交互和智能风控）。
 
-
+下载注册直接体验（邀请码：SSR57M）：[易策随身 · 下载](https://easydeal.fay-agent.com/app/download)
 
 ## 主要特点
 
