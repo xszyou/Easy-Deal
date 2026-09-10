@@ -1,50 +1,146 @@
 
-#property copyright "Copyright 2026, by xszyou"
-#property link      ""
-#property version   "1.00"
+#property copyright "Copyright 2026, xszyou - Open Source Standalone Edition"
+#property link      "https://github.com/xszyou/Easy-Deal"
+#property version   "1.082" // Open-source standalone edition; strategy version unchanged
+// Source mirrors: https://gitee.com/xszyou/easy-deal and https://github.com/xszyou/Easy-Deal
 #property strict
+//+------------------------------------------------------------------+
+//| 升级日志 (Changelog)                                             |
+//|------------------------------------------------------------------|
+//|------------------------------------------------------------------|
+//| v1.082 2026-09-02  新增每周开盘延迟启动参数                        |
+//|   [新增] InpWeekStartDelayHours：每周真实开盘后延迟 N 小时才允许   |
+//|          开启新一轮；等待期间已有持仓仍正常管理、风控和退出。       |
+//|------------------------------------------------------------------|
+//| v1.081 2026-09-02  周盈/周亏改为按本 EA 的 symbol+magic 独立核算   |
+//|   [修复] 同账户多 EA 不再共享 ACCOUNT_EQUITY 周基准，避免一组达标   |
+//|          后触发所有 magic 同步清仓。口径=基准后已平盈亏+当前浮盈亏。|
+//|------------------------------------------------------------------|
+//| v1.08wl 2026-08-29  周末软着陆与重复补腿修复                       |
+//|   [修复] 按 SymbolInfoSessionTrade 计算本周真实收盘，不再假设周五24点|
+//|   [修复] 软着陆窗口内：纯底仓立即全平；有马丁只允许自然退出，退出后全平|
+//|   [修复] 窗口内禁止首单、爬梯、补腿及新马丁                        |
+//|   [修复] 跨周休市时保留待重置状态，开市后可靠建立新周 baseline      |
+//|   [修复] WeekResetOnBoot=false 仍初始化 baseline，避免从0误判周盈利 |
+//|   [修复] recovery 增加成交认领轮询与缺腿二次确认，防重复同向 base   |
+//|   [安全] 默认按 magic 过滤；稳定态奇数持仓转安全停机，不再带病运行   |
+//|------------------------------------------------------------------|
+//| v1.07wl 2026-08-25  严格对齐 broker 开盘/休市切周 + B1 启动重置     |
+//|   [新增] InpWeekResetOnBoot (bool, true): 启动/重启按"新周"重置   |
+//|          baseline, 支持 EA 在周二/周三/休市期间挂上也能正确重置    |
+//|   [新增] InpWeekResetGuardSecs (int, 300): 重置后 N 秒内不开新仓, |
+//|          防挂上瞬间 spread/commission 偏差污染 delta 基准          |
+//|   [改造] WeeklyGate() 改为"等 symbol 可交易再设 baseline"两步法:  |
+//|          a) OnTick 触发时若 curWeekIdx==-1 (未 baseline) 且        |
+//|             SymbolInfoInteger(_Symbol,SYMBOL_TRADE_MODE)!=DISABLED|
+//|             → 重置; 否则保持 armed 状态跳过本 tick, 等开盘          |
+//|          b) 跨过周末切 wk 也走同样"等可交易"逻辑, 防止周末末 tick   |
+//|             触发误设 baseline (session 末 spread 拉宽)              |
+//|   [改造] InSoftCloseWindow() 改用 SymbolInfoSession 取"今天"最后   |
+//|          session 结束秒偏移, 与 broker 周五真实收盘对齐; 不再依赖   |
+//|          day_of_week==5 + hour>=24-softCloseHours 这种日历启发   |
+//|   [防御] OpenBlockedNow() 新增 weekResetGuardUntil 闸门 (B1 guard) |
+//|          重置后 N 秒内不开 BUY/SELL, 让 baseline 落在"市场真态"上   |
+//|------------------------------------------------------------------|
+//| v1.06wl 2026-08-11  幽灵票守卫(实盘 MT5-2 卡死事故修复)           |
+//|   [修复] closeMartinOrders 平 base 时若记账票已不在实仓(外部平仓/  |
+//|          换挂接管遗留陈年票), 旧代码 return false → 马丁组永远走不 |
+//|          完 → seek 卡死 + 每 tick 刷 "Close sell base failed      |
+//|          #4753"(实测一天 13 万行)。改为跳过平仓直接重开。          |
+//|   [修复] ShouldAutoReload 顶部加「陈年票号强制重载」: 任一记账票号 |
+//|          已不在实仓则无视零损周期/交易冷却抑制直接重扫(那两道门会  |
+//|          让失真状态永久卡死)。仅保留 MIN_INTERVAL 节流。          |
+//|   [说明] 同源版本也存在该问题，换挂接管遗留仓时最易触发。         |
+//|------------------------------------------------------------------|
+//| v1.05wl 2026-08-08  GMarket_wl 四件套(风洞冠军配置回测验证版)     |
+//|   默认参数 = A组 step0.7/interval1.0 + MaxLoss1000 + 布林门9999   |
+//|   [新增] 周盈落袋: 权益较周初 >=InpWeekProfitLock 全平收工到下周  |
+//|   [新增] 周末软着陆: 周五收盘前 InpSoftCloseHours 小时不开新马丁, |
+//|          窗口内马丁组自然了结即全平收工; 无马丁则底仓自然过周末   |
+//|   [新增] 马丁手数封顶 InpMartinLotCap (0.08): 每刀变浅            |
+//|   [新增] 割肉冷却 InpCutCooldownHours (24h): 割后不开新局, 斩连环 |
+//|   依据: 29真实tick周 22/29胜 +1074; 合成30周 24/30; MC100世界     |
+//|         同种子69/100优于三件套, 中位收益-10.4%到+0.6%             |
+//|------------------------------------------------------------------|
+//| v1.04  2026-07-14                                                |
+//|   [防御] MartinSpacingGuard 防贴脸护栏：两处马丁开仓在 Sleep(500) |
+//|          后、发单前重读锚点(lastMartinOrderTick 开仓价)，seek>0   |
+//|          且实际落地价距锚点 < martinInterval×0.5 → 回滚刚开的     |
+//|          base、跳过本层、打 "MartinSpacingGuard" 日志并走既有     |
+//|          backoff。正常路径永不触发；触发即说明存在"判定与落地     |
+//|          之间锚点被改"的未知路径。                                |
+//|   [说明] 复盘定性：此前监控报的"贴脸 0.00x%"系判据错误(量的是     |
+//|          马丁与同秒配对新 base，设计上必然同价)。真实首层间距     |
+//|          均 ≥1.2% 合法；残留问题=首层马丁进场距离无上界(2.4~3.4%  |
+//|          危险区进场)，属进场帽/区间门范畴，待 G5b 回测拍板。      |
+//| v1.03  2026-07-07                                                |
+//|   [修复] CalcSeek() 清马丁后漏重置 lastMartinOrderTick：seek==0   |
+//|          时旧代码把 lastMartinOrderTick 指向反向 base 而非 -1，   |
+//|          导致下次新 base 开出时马丁仍以远价老锚点为参照，间距     |
+//|          1.2% 条件瞬间满足 → 同秒开出新马丁与新 base，间距近乎    |
+//|          零。现 seek==0 时统一置 lastMartinOrderTick = -1。       |
+//| v1.02  2026-07-01                                                |
+//|   [修复] 爬梯冻结：closeMartinOrders() 平完马丁未清「零损周期」   |
+//|          标志，导致 breakevenCycleActive 卡在 true → ladderPaused |
+//|          恒真 → 上下爬梯全部停摆(实测卡死 16h)。现在平马丁后清    |
+//|          breakevenCycleActive/ResetDone/MartinTicket/BaseTicket。 |
+//|   [修复] #4753 平仓死循环：closeMartinOrders 对已不存在的幽灵单   |
+//|          反复平仓失败(err 4753)→死循环刷屏。现遇仓位不存在即当    |
+//|          已平、移出跟踪、跳过，不再空转。                         |
+//| v1.01  2026-06-30                                                |
+//|   [修复] 马丁矩离锚点漂移：马丁触发距离原以会随爬梯/重载漂移的     |
+//|          base 价为参照；单边行情下锚点漂到远价位老 base，使 1.2%  |
+//|          条件近乎恒真 → 在错误价位连开马丁(~1点间距、手数翻倍     |
+//|          失控 0.04→0.12→0.28→0.60)。现 seek>0 时改以「最后一张    |
+//|          马丁单开仓价」为参照，恢复正常等距(≥1.2%)台阶。          |
+//| v1.00  基线版本(双向对冲+爬梯追踪+马丁加仓)                       |
+//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
-//|                                                      MyExpert.mq5|
-//|                        Copyright 2024, MetaQuotes Software Corp. |
-//|                                       http://www.metaquotes.net/ |
+//|                                                     GMarket.mq5|
+//|                     Open Source Standalone Edition, xszyou 2026 |
+//|                         https://github.com/xszyou/Easy-Deal |
 //+------------------------------------------------------------------+
 #property strict
 
-#include <Trade/Trade.mqh>
-
-//@easydeal symbol=XAUUSD magic=999
-// ↑ EasyDeal 用这行声明本 EA 的默认品种/魔术号(纯注释,不影响编译/运行)。
-//   品种用通用 XAUUSD,EasyDeal 会按 broker 实际符号(XAUUSDc/XAUUSDm 等)模糊匹配。
-
-// 输入参数 (默认值；运行时可被 MQL5/Files/GMarket_config.set 覆盖)
+// 输入参数（由 MT5 参数面板设置，启动时映射到运行变量）
 input double InpFirstLots = 0.02;              // 起手大小
-input double InpStep = 0.8;                    // 梯级（百分比）
-input double InpMartinInterval = 1.2;          // 马丁最小矩离（百分比）
+input double InpStep = 0.7;                    // 梯级（百分比）[A组]
+input double InpMartinInterval = 1.0;          // 马丁最小矩离（百分比）[A组]
 input double InpFilter = 0.1;                  // 虑波器（百分比）
 input int    InpOrderTime = 0;                 // 开单间隔（秒）
 input int    InpRetrySeconds = 1800;           // 重试间隔（秒）
 input bool   InpIsPaused = false;              // 暂停策略执行
 input bool   InpMartinEnabled = true;          // 马丁开关
-input bool   InpIgnoreMagicNumber = true;      // 是否忽略魔术数（手操计入）
-input double InpMaxLoss = 3000;                // 最大浮亏
+input bool   InpIgnoreMagicNumber = false;     // 是否忽略魔术数（默认仅管理本EA，开启会把同品种手操单计入）
+input double InpMaxLoss = 1000;                // 最大浮亏
 input int    InpMaxMartinLevel = 3;            // 最大马丁层数
 input double InpMaxAtrPct = 1.5;               // 允许马丁的最大ATR 百分比
-input double InpMaxBollDeviation = 2.0;        // 允许马丁的最大布林带偏离
+input double InpMaxBollDeviation = 9999.0;     // 允许马丁的最大布林带偏离(9999=复现实盘死门)
 input double InpMartinBreakevenProfit = 30;    // 马丁零损保护缓冲金额，<=0 关闭
+input double InpMartinExitProfit = 0;          // 马丁整平利润目标(0=原版回正即平; 100~200=验证甜点区; 300+已证有害)
 input bool   InpLogicalBreakeven = true;       // 逻辑零损保护（不修改订单）
 input bool   InpBreakevenResetLadder = true;   // 零损时平掉爬梯方向base并重开
-input bool   InpNewsFilterEnabled = true;      // 允许马丁的新闻过滤开关
+input bool   InpNewsFilterEnabled = false;     // 允许马丁的新闻过滤开关(NFP过滤已证伪,默认关)
 input int    InpNewsBeforeMinutes = 60;        // 新闻前暂停分钟数
 input int    InpNewsAfterMinutes = 60;         // 新闻后暂停分钟数
 input bool   InpNewsHighImportance = true;     // 过滤高重要性新闻
 input bool   InpNewsMediumImportance = false;  // 过滤中重要性新闻
-input int    InpMagicNumber = 999;             // 魔术数
+input int    InpMagicNumber = 999;             // 魔术数(=旧GMarket, 用于接手遗留仓)
+// ===== 四件套周机制 (风洞 2026-08-08 定版) =====
+input double InpWeekProfitLock   = 200.0;      // 周盈落袋: 权益较周初 >=X 全平收工 (0=关)
+input double InpWeekLossHalt     = 0;          // 周亏熔断: 权益较周初 <=-X 全平收工 (0=关)
+input int    InpSoftCloseHours   = 12;         // 周末软着陆窗口小时 (0=关)
+input double InpMartinLotCap     = 0.08;       // 马丁单手数封顶 (0=关)
+input double InpCutCooldownHours = 24;         // 割肉后冷却小时 (0=关)
+input bool   InpWeekResetOnBoot      = true;   // 启动/重启按"新周"重置base (周二/周三挂上也能重置)
+input int    InpWeekResetGuardSecs   = 300;    // 重置后多少秒内不开新仓 (防挂上瞬间spread污染baseline)
+input double InpWeekStartDelayHours  = 0.0;    // 每周真实开盘后延迟开新一轮的小时数 (0=不延迟；已有仓继续管理)
 
-// ===== Runtime globals (writable; overridable by GMarket_config.set) =====
-// Body code reads these; OnInit seeds them from Inp*; ReloadRuntimeConfig overrides from file.
+// ===== Runtime globals (seeded from input parameters at startup) =====
+// Strategy code reads these; OnInit seeds them from the matching Inp* values.
 double firstLots;
 double step;
 double martinInterval;
@@ -55,6 +151,7 @@ bool   isPaused;
 bool   martinEnabled;
 bool   ignoreMagicNumber;
 double maxLoss;
+double martinExitProfit;
 int    maxMartinLevel;
 double maxAtrPct;
 double maxBollDeviation;
@@ -67,10 +164,24 @@ int    newsAfterMinutes;
 bool   newsHighImportance;
 bool   newsMediumImportance;
 int    MAGIC_NUMBER;
-
-// Config/trigger file state
-datetime g_lastConfigApplied = 0;      // content timestamp from config.set (ts= line)
-datetime g_lastReloadTrigger = 0;      // content timestamp from reload.trigger
+double weekProfitLock;
+double weekLossHalt;
+int    softCloseHours;
+double martinLotCap;
+double cutCooldownHours;
+bool   weekResetOnBoot;
+int    weekResetGuardSecs;
+double weekStartDelayHours;
+// 周状态 (四件套)
+double   weekStartEquity = 0;
+long     curWeekIdx = -1;
+bool     weekHalted = false;
+bool     softMartinSeen = false;
+datetime cutPauseUntil = 0;
+// 启动重置 + guard (B1: EA 在休市/周中挂上时正确重置 baseline)
+datetime weekResetAt     = 0;   // 最近一次重置 baseline 的 tick 时刻 (用于 guard 窗口)
+datetime weekResetGuardUntil = 0; // 重置后 N 秒内不开新仓
+bool     weekBaselineArmed = false; // 首次拿到 baseline 后置 true (避免重复重置)
 
 
 // UI Constants
@@ -110,7 +221,12 @@ long lastCloseAttemptTicket = -1;       // 平仓去重：上次尝试平仓的 
 datetime lastCloseAttemptTime = 0;      // 及其时间
 const int CLOSE_DEDUP_WINDOW = 2;       // 同一 ticket 在该秒数内不重复发平仓请求，避免上一次平仓还在途时再发触发 #10039「Order to close already exists」
 datetime nextRecoverAttemptTime = 0;
+datetime missingBuyConfirmedAt = 0;
+datetime missingSellConfirmedAt = 0;
 const int RECOVER_MIN_INTERVAL = 5;
+const int RECOVER_CONFIRM_SECONDS = 5;
+const int POSITION_CLAIM_RETRIES = 10;
+const int POSITION_CLAIM_SLEEP_MS = 200;
 datetime nextLadderResetAttemptTime = 0;
 const int LADDER_RESET_MIN_INTERVAL = 5;
 bool breakevenReloadBlock = false;
@@ -248,6 +364,31 @@ long FindLatestPositionTicket(ENUM_POSITION_TYPE type, double volume, double pri
    return latestTicket;
 }
 
+long FindRecentPositionTicket(ENUM_POSITION_TYPE type, double volume,
+                              datetime earliestTime, double price)
+{
+   long latestTicket = -1;
+   datetime latestTime = 0;
+   double volumeStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double priceTolerance = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 50;
+
+   for (int i = PositionsTotal() - 1; i >= 0; i--){
+      long ticket = -1;
+      if (!SelectPositionByIndex(i, ticket) || !IsTrackedPosition()) continue;
+      if ((int)PositionGetInteger(POSITION_TYPE) != type) continue;
+      if (MathAbs(PositionGetDouble(POSITION_VOLUME) - volume) > volumeStep) continue;
+
+      datetime posTime = (datetime)PositionGetInteger(POSITION_TIME);
+      if (posTime < earliestTime) continue;
+      if (price > 0 && MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - price) > priceTolerance) continue;
+      if (posTime >= latestTime){
+         latestTime = posTime;
+         latestTicket = ticket;
+      }
+   }
+   return latestTicket;
+}
+
 bool SelectPositionByTicket(long ticket)
 {
    if (ticket <= 0){
@@ -323,6 +464,7 @@ int MartinBackoffRemaining(datetime lastFail, int failCount)
 
 long SendMarketOrder(ENUM_ORDER_TYPE orderType, double volume, string comment)
 {
+   double orderVolume = volume;
 
    MqlTradeRequest request;
    MqlTradeResult result;
@@ -332,7 +474,7 @@ long SendMarketOrder(ENUM_ORDER_TYPE orderType, double volume, string comment)
    double price = (orderType == ORDER_TYPE_BUY) ? GetAsk() : GetBid();
    request.action = TRADE_ACTION_DEAL;
    request.symbol = _Symbol;
-   request.volume = volume;
+   request.volume = orderVolume;
    request.type = orderType;
    request.price = price;
    request.deviation = slippagePoints;
@@ -340,25 +482,41 @@ long SendMarketOrder(ENUM_ORDER_TYPE orderType, double volume, string comment)
    request.comment = comment;
    request.type_filling = GetSymbolFillingMode();
 
+   datetime sentAt = TimeCurrent();
    MarkTradeAction();
    ResetLastError();
-   if (!OrderSend(request, result) || result.retcode != TRADE_RETCODE_DONE){
+   // DONE_PARTIAL(部分成交)也算成功: 仓位已真实存在, 按失败返 -1 会触发 recovery 重复开腿
+   if (!OrderSend(request, result) ||
+       (result.retcode != TRADE_RETCODE_DONE && result.retcode != TRADE_RETCODE_DONE_PARTIAL)){
       string orderTypeName = orderType == ORDER_TYPE_BUY ? "BUY" : "SELL";
       PrintFormat("OrderSend failed: type=%s volume=%.2f price=%.5f filling=%d retcode=%d lastError=%d comment=%s",
-                  orderTypeName, volume, price, (int)request.type_filling,
+                  orderTypeName, orderVolume, price, (int)request.type_filling,
                   (int)result.retcode, GetLastError(), result.comment);
       return -1;
    }
 
-   long positionTicket = GetPositionTicketFromDeal(result.deal);
-   if (positionTicket <= 0 && result.order > 0){
-      positionTicket = (long)result.order;
+
+   long hintedTicket = GetPositionTicketFromDeal(result.deal);
+   if (hintedTicket <= 0 && result.order > 0){
+      hintedTicket = (long)result.order;
    }
-   if (positionTicket <= 0){
-      ENUM_POSITION_TYPE posType = orderType == ORDER_TYPE_BUY ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
-      positionTicket = FindLatestPositionTicket(posType, volume, price);
+
+   ENUM_POSITION_TYPE posType = orderType == ORDER_TYPE_BUY ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+   // 慢 broker 可能先返回 DONE、稍后才把 position 注册进终端。最多等约 2 秒，
+   // 且只认领本次发单时刻之后出现的仓位，不能误拿同方向旧 base。
+   for (int attempt = 0; attempt < POSITION_CLAIM_RETRIES; attempt++){
+      if (hintedTicket > 0 && SelectPositionByTicket(hintedTicket)){
+         return hintedTicket;
+      }
+      long claimed = FindRecentPositionTicket(posType, orderVolume, sentAt - 1,
+                                              attempt < 3 ? price : 0);
+      if (claimed > 0) return claimed;
+      Sleep(POSITION_CLAIM_SLEEP_MS);
    }
-   return positionTicket;
+
+   // result.order 可能只是订单票而非持仓票；未确认仓位存在时必须返回 -1，
+   // 交给带二次确认的 recovery 重扫，避免保存幽灵票号。
+   return -1;
 }
 
 bool ClosePositionByTicket(long ticket)
@@ -572,13 +730,7 @@ void RecalculateMartinState()
    if (seek > 0){
       lastMartinOrderTick = bestTicket;
    }else{
-      if (followType == POSITION_TYPE_BUY){
-         lastMartinOrderTick = lastSellOrderTick;
-      }else if (followType == POSITION_TYPE_SELL){
-         lastMartinOrderTick = lastBuyOrderTick;
-      }else{
-         lastMartinOrderTick = -1;
-      }
+      lastMartinOrderTick = -1;   // 马丁已全平，清掉残留锚点，防止下次新base开出时误用远价老马丁票触发同价马丁(2026-07-07)
    }
 }
 
@@ -589,6 +741,8 @@ long FindLatestBaseTicketByType(ENUM_POSITION_TYPE type)
 
 bool ResetLadderBase()
 {
+   // 软着陆窗口禁止任何平后重开；现有马丁组只允许自然退出。
+   if (InSoftCloseWindow()) return false;
    if (!breakevenResetLadderEnabled){
       return false;
    }
@@ -944,9 +1098,9 @@ void ApplyMartinBreakevenStops()
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
-// ---- runtime config / reload helpers ---------------------------------------
+// ---- runtime input initialization ------------------------------------------
 
-// Copy Inp* input defaults into runtime globals. Called at OnInit (before config override).
+// Copy Inp* values into runtime globals at initialization.
 void SeedRuntimeFromInputs()
   {
     firstLots                   = InpFirstLots;
@@ -963,6 +1117,7 @@ void SeedRuntimeFromInputs()
     maxAtrPct                   = InpMaxAtrPct;
     maxBollDeviation            = InpMaxBollDeviation;
     martinBreakevenProfit       = InpMartinBreakevenProfit;
+    martinExitProfit            = InpMartinExitProfit;
     logicalBreakevenEnabled     = InpLogicalBreakeven;
     breakevenResetLadderEnabled = InpBreakevenResetLadder;
     newsFilterEnabled           = InpNewsFilterEnabled;
@@ -971,172 +1126,19 @@ void SeedRuntimeFromInputs()
     newsHighImportance          = InpNewsHighImportance;
     newsMediumImportance        = InpNewsMediumImportance;
     MAGIC_NUMBER                = InpMagicNumber;
-  }
-
-bool ParseBoolValue(string v)
-  {
-    StringToLower(v);
-    return (v == "true" || v == "1" || v == "yes" || v == "on");
-  }
-
-// Apply one key=value override. Returns true if key is recognized.
-bool ApplyRuntimeOverride(string key, string val)
-  {
-    if (key == "InpFirstLots")             { firstLots = StringToDouble(val); return true; }
-    if (key == "InpStep")                  { step = StringToDouble(val); return true; }
-    if (key == "InpMartinInterval")        { martinInterval = StringToDouble(val); return true; }
-    if (key == "InpFilter")                { filter = StringToDouble(val); return true; }
-    if (key == "InpOrderTime")             { orderTime = (int)StringToInteger(val); return true; }
-    if (key == "InpRetrySeconds")          { retrySeconds = (int)StringToInteger(val); return true; }
-    if (key == "InpIsPaused")              { isPaused = ParseBoolValue(val); return true; }
-    if (key == "InpMartinEnabled")         { martinEnabled = ParseBoolValue(val); return true; }
-    if (key == "InpIgnoreMagicNumber")     { ignoreMagicNumber = ParseBoolValue(val); return true; }
-    if (key == "InpMaxLoss")               { maxLoss = StringToDouble(val); return true; }
-    if (key == "InpMaxMartinLevel")        { maxMartinLevel = (int)StringToInteger(val); return true; }
-    if (key == "InpMaxAtrPct")             { maxAtrPct = StringToDouble(val); return true; }
-    if (key == "InpMaxBollDeviation")      { maxBollDeviation = StringToDouble(val); return true; }
-    if (key == "InpMartinBreakevenProfit") { martinBreakevenProfit = StringToDouble(val); return true; }
-    if (key == "InpLogicalBreakeven")      { logicalBreakevenEnabled = ParseBoolValue(val); return true; }
-    if (key == "InpBreakevenResetLadder")  { breakevenResetLadderEnabled = ParseBoolValue(val); return true; }
-    if (key == "InpNewsFilterEnabled")     { newsFilterEnabled = ParseBoolValue(val); return true; }
-    if (key == "InpNewsBeforeMinutes")     { newsBeforeMinutes = (int)StringToInteger(val); return true; }
-    if (key == "InpNewsAfterMinutes")      { newsAfterMinutes = (int)StringToInteger(val); return true; }
-    if (key == "InpNewsHighImportance")    { newsHighImportance = ParseBoolValue(val); return true; }
-    if (key == "InpNewsMediumImportance")  { newsMediumImportance = ParseBoolValue(val); return true; }
-    if (key == "InpMagicNumber")           { MAGIC_NUMBER = (int)StringToInteger(val); return true; }
-    return false;
-  }
-
-// Read GMarket_config.set (written by MCP) and apply overrides.
-// If forceApply=false, skip when file mtime hasn't advanced since last apply.
-// Returns true if any overrides were applied.
-bool ReloadRuntimeConfig(bool forceApply)
-  {
-    // 协议文件名按 EA 程序名拼，不写死 —— fork 改名(如 GMarket2.ex5)也能各用各的，
-    // 跟 MCP 端 _resolve_ea_filename(按 .mq5/.ex5 名)对齐。
-    string filename = MQLInfoString(MQL5_PROGRAM_NAME) + "_config.set";
-    if (!FileIsExist(filename)) return false;
-
-    int fh = FileOpen(filename, FILE_READ | FILE_TXT | FILE_ANSI);
-    if (fh == INVALID_HANDLE) return false;
-
-    datetime mtime = (datetime)FileGetInteger(fh, FILE_MODIFY_DATE);
-    if (!forceApply && mtime > 0 && mtime <= g_lastConfigApplied){
-       FileClose(fh);
-       return false;
-    }
-
-    int applied = 0;
-    int unknown = 0;
-    while (!FileIsEnding(fh)){
-       string line = FileReadString(fh);
-       StringTrimLeft(line); StringTrimRight(line);
-       if (StringLen(line) == 0) continue;
-       if (StringGetCharacter(line, 0) == '#') continue;
-       int eq = StringFind(line, "=");
-       if (eq <= 0) continue;
-       string key = StringSubstr(line, 0, eq);
-       string val = StringSubstr(line, eq + 1);
-       StringTrimLeft(key); StringTrimRight(key);
-       StringTrimLeft(val); StringTrimRight(val);
-       if (key == "ts") continue;
-       if (ApplyRuntimeOverride(key, val)) applied++;
-       else unknown++;
-    }
-    FileClose(fh);
-
-    if (mtime > 0) g_lastConfigApplied = mtime;
-    if (applied > 0 || unknown > 0){
-       PrintFormat("ReloadRuntimeConfig: %d applied, %d unknown (mtime=%s)",
-                   applied, unknown, TimeToString(mtime, TIME_DATE | TIME_SECONDS));
-    }
-    if (applied > 0) UpdateButtonState();
-    return applied > 0;
-  }
-
-// Watch GMarket_reload.trigger (contains a timestamp). When it advances, force
-// a chart reinit so OnInit fires and picks up a freshly compiled .ex5.
-bool CheckReloadTrigger()
-  {
-    string filename = MQLInfoString(MQL5_PROGRAM_NAME) + "_reload.trigger";
-    if (!FileIsExist(filename)) return false;
-    int fh = FileOpen(filename, FILE_READ | FILE_TXT | FILE_ANSI);
-    if (fh == INVALID_HANDLE) return false;
-    string content = "";
-    if (!FileIsEnding(fh)) content = FileReadString(fh);
-    FileClose(fh);
-    StringTrimLeft(content); StringTrimRight(content);
-    if (StringLen(content) == 0) return false;
-    datetime ts = (datetime)StringToInteger(content);
-    if (ts <= 0) return false;
-    if (g_lastReloadTrigger == 0){
-       g_lastReloadTrigger = ts;  // prime on first observation, don't fire
-       return false;
-    }
-    if (ts > g_lastReloadTrigger){
-       g_lastReloadTrigger = ts;
-       return true;
-    }
-    return false;
-  }
-
-// Dump current runtime parameter values to MQL5/Files/GMarket_runtime.json
-// so MCP can read the true runtime values (post-override).
-void DumpInputsRuntime()
-  {
-    string filename = MQLInfoString(MQL5_PROGRAM_NAME) + "_runtime.json";
-    int fh = FileOpen(filename, FILE_WRITE | FILE_TXT | FILE_ANSI);
-    if (fh == INVALID_HANDLE){
-       PrintFormat("DumpInputsRuntime: FileOpen failed, err=%d", GetLastError());
-       return;
-    }
-    string ts = TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS);
-    string cfgTs = (g_lastConfigApplied > 0
-                    ? TimeToString(g_lastConfigApplied, TIME_DATE | TIME_SECONDS)
-                    : "");
-    string json = "{\n";
-    json += "  \"ea_name\": \"" + MQLInfoString(MQL5_PROGRAM_NAME) + "\",\n";
-    json += "  \"symbol\": \"" + _Symbol + "\",\n";
-    json += "  \"updated_at\": \"" + ts + "\",\n";
-    json += "  \"config_applied_at\": \"" + cfgTs + "\",\n";
-    json += "  \"magic\": " + IntegerToString(MAGIC_NUMBER) + ",\n";
-    json += "  \"ts\": " + IntegerToString((int)TimeCurrent()) + ",\n";
-    json += "  \"magic_number\": " + IntegerToString(MAGIC_NUMBER) + ",\n";
-    json += "  \"params\": {\n";
-    json += "    \"InpFirstLots\": "             + DoubleToString(firstLots, 4) + ",\n";
-    json += "    \"InpStep\": "                  + DoubleToString(step, 4) + ",\n";
-    json += "    \"InpMartinInterval\": "        + DoubleToString(martinInterval, 4) + ",\n";
-    json += "    \"InpFilter\": "                + DoubleToString(filter, 4) + ",\n";
-    json += "    \"InpOrderTime\": "             + IntegerToString(orderTime) + ",\n";
-    json += "    \"InpRetrySeconds\": "          + IntegerToString(retrySeconds) + ",\n";
-    json += "    \"InpIsPaused\": "              + (isPaused ? "true" : "false") + ",\n";
-    json += "    \"InpMartinEnabled\": "         + (martinEnabled ? "true" : "false") + ",\n";
-    json += "    \"InpIgnoreMagicNumber\": "     + (ignoreMagicNumber ? "true" : "false") + ",\n";
-    json += "    \"InpMaxLoss\": "               + DoubleToString(maxLoss, 2) + ",\n";
-    json += "    \"InpMaxMartinLevel\": "        + IntegerToString(maxMartinLevel) + ",\n";
-    json += "    \"InpMaxAtrPct\": "             + DoubleToString(maxAtrPct, 4) + ",\n";
-    json += "    \"InpMaxBollDeviation\": "      + DoubleToString(maxBollDeviation, 4) + ",\n";
-    json += "    \"InpMartinBreakevenProfit\": " + DoubleToString(martinBreakevenProfit, 2) + ",\n";
-    json += "    \"InpLogicalBreakeven\": "      + (logicalBreakevenEnabled ? "true" : "false") + ",\n";
-    json += "    \"InpBreakevenResetLadder\": "  + (breakevenResetLadderEnabled ? "true" : "false") + ",\n";
-    json += "    \"InpNewsFilterEnabled\": "     + (newsFilterEnabled ? "true" : "false") + ",\n";
-    json += "    \"InpNewsBeforeMinutes\": "     + IntegerToString(newsBeforeMinutes) + ",\n";
-    json += "    \"InpNewsAfterMinutes\": "      + IntegerToString(newsAfterMinutes) + ",\n";
-    json += "    \"InpNewsHighImportance\": "    + (newsHighImportance ? "true" : "false") + ",\n";
-    json += "    \"InpNewsMediumImportance\": "  + (newsMediumImportance ? "true" : "false") + ",\n";
-    json += "    \"InpMagicNumber\": "           + IntegerToString(MAGIC_NUMBER) + "\n";
-    json += "  }\n";
-    json += "}\n";
-    FileWriteString(fh, json);
-    FileClose(fh);
+    weekProfitLock              = InpWeekProfitLock;
+    weekLossHalt                = InpWeekLossHalt;
+    softCloseHours              = InpSoftCloseHours;
+    martinLotCap                = InpMartinLotCap;
+    cutCooldownHours            = InpCutCooldownHours;
+    weekResetOnBoot             = InpWeekResetOnBoot;
+    weekResetGuardSecs          = InpWeekResetGuardSecs;
+    weekStartDelayHours         = MathMax(0.0, InpWeekStartDelayHours);
   }
 
 int OnInit()
   {
     SeedRuntimeFromInputs();
-    ReloadRuntimeConfig(true);           // always apply overrides on init
-    // Prime reload trigger so we don't fire on a stale file immediately after attach.
-    CheckReloadTrigger();
 
     ClearBreakevenTargets();
     breakevenCycleActive = false;
@@ -1144,14 +1146,15 @@ int OnInit()
     breakevenCycleMartinTicket = -1;
     breakevenCycleBaseTicket = -1;
     nextLadderResetAttemptTime = 0;
-
-    DumpInputsRuntime();
+    nextRecoverAttemptTime = 0;
+    missingBuyConfirmedAt = 0;
+    missingSellConfirmedAt = 0;
 
     long marginMode = AccountInfoInteger(ACCOUNT_MARGIN_MODE);
     if (marginMode != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING){
-       PrintFormat("Init failed: this EA requires a hedging account, current margin mode=%s",
+       PrintFormat("[GMarket] 非对冲账户(回测放行不退出), margin mode=%s",
                    GetMarginModeName(marginMode));
-       return(INIT_FAILED);
+       // 保持 v1.082 原策略行为：不因账户模式检测退出。
     }
 
     // 初始化代码
@@ -1164,27 +1167,8 @@ int OnInit()
     CreateGUI();
     UpdateGUI();
 
-    EventSetTimer(3);  // poll config + reload trigger every 3s
-
     printfPro("重新载入");
     return(INIT_SUCCEEDED);
-  }
-
-//+------------------------------------------------------------------+
-//| Timer: poll config.set and reload.trigger                        |
-//+------------------------------------------------------------------+
-void OnTimer()
-  {
-    if (ReloadRuntimeConfig(false)){
-       UpdateEAStatus();
-       UpdateGUI();
-       printfPro("参数已热更新");
-    }
-    DumpInputsRuntime();  // 心跳：每个 timer tick 都刷新 runtime.json 的 updated_at，让客户端知道 EA 还活着
-    if (CheckReloadTrigger()){
-       printfPro("Reload trigger detected: forcing chart reinit");
-       ChartSetSymbolPeriod(0, _Symbol, _Period);
-    }
   }
 
 //+------------------------------------------------------------------+
@@ -1192,7 +1176,6 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
-    EventKillTimer();
     if (atrHandle != INVALID_HANDLE){
        IndicatorRelease(atrHandle);
        atrHandle = INVALID_HANDLE;
@@ -1206,17 +1189,281 @@ void OnDeinit(const int reason)
   }
 
 //+------------------------------------------------------------------+
+//| 四件套周机制: 周基准/落袋/熔断/软着陆/冷却 (风洞 2026-08-08 定版)|
+//| v1.08wl 2026-08-29  使用 SymbolInfoSessionTrade 对齐真实交易时段   |
+//|   - "周"按 broker server time 切分，休市跨周时延迟到开市建 baseline|
+//|   - 软着陆窗口按本周最后交易 session 的结束时间倒推                |
+//|   - 窗口内纯底仓立即全平；马丁组自然退出后全平，不再开新仓          |
+//|   - 启动和跨周重置后由 guard 暂停开仓，避免 spread 污染 baseline    |
+//+------------------------------------------------------------------+
+
+// --- helpers ----------------------------------------------------------
+
+int SessionSeconds(datetime value)
+{
+   MqlDateTime dt;
+   TimeToStruct(value, dt);
+   return dt.hour * 3600 + dt.min * 60 + dt.sec;
+}
+
+bool IsTradeSessionOpenNow(datetime now)
+{
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+   int nowSeconds = dt.hour * 3600 + dt.min * 60 + dt.sec;
+
+   for (uint session = 0; session < 16; session++){
+      datetime fromTime = 0;
+      datetime toTime = 0;
+      if (!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dt.day_of_week,
+                                  session, fromTime, toTime)){
+         break;
+      }
+      int fromSeconds = SessionSeconds(fromTime);
+      int toSeconds = SessionSeconds(toTime);
+      if (toSeconds == 0) toSeconds = 86400;
+
+      if (fromSeconds <= toSeconds){
+         if (nowSeconds >= fromSeconds && nowSeconds < toSeconds) return true;
+      }else{
+         // 极少数 broker 的交易时段会跨越午夜。
+         if (nowSeconds >= fromSeconds || nowSeconds < toSeconds) return true;
+      }
+   }
+   return false;
+}
+
+bool SymbolTradeAllowed()
+{
+   long mode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   bool permission = (mode == SYMBOL_TRADE_MODE_FULL ||
+                      mode == SYMBOL_TRADE_MODE_LONGONLY ||
+                      mode == SYMBOL_TRADE_MODE_SHORTONLY);
+   return permission && IsTradeSessionOpenNow(TimeCurrent());
+}
+
+bool GetCurrentWeekClose(datetime now, datetime &closeTime)
+{
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+   datetime todayStart = now - dt.hour * 3600 - dt.min * 60 - dt.sec;
+   int daysSinceMonday = (dt.day_of_week + 6) % 7;
+   datetime mondayStart = todayStart - daysSinceMonday * 86400;
+
+   bool found = false;
+   datetime latestClose = 0;
+   // 搜索周一到周六，排除属于下个交易周的周日晚间开盘。
+   for (int dayOffset = 0; dayOffset <= 5; dayOffset++){
+      ENUM_DAY_OF_WEEK day = (ENUM_DAY_OF_WEEK)(dayOffset + 1);
+      for (uint session = 0; session < 16; session++){
+         datetime fromTime = 0;
+         datetime toTime = 0;
+         if (!SymbolInfoSessionTrade(_Symbol, day, session, fromTime, toTime)){
+            break;
+         }
+         int fromSeconds = SessionSeconds(fromTime);
+         int toSeconds = SessionSeconds(toTime);
+         datetime candidate = mondayStart + dayOffset * 86400 + toSeconds;
+         if (toSeconds <= fromSeconds) candidate += 86400;
+         if (!found || candidate > latestClose){
+            latestClose = candidate;
+            found = true;
+         }
+      }
+   }
+
+   if (!found){
+      // broker 未提供 session 元数据时保守回落到周六 00:00（server time）。
+      latestClose = mondayStart + 5 * 86400;
+   }
+   closeTime = latestClose;
+   return found;
+}
+
+// --- gates ------------------------------------------------------------
+
+// 周盈/周亏只核算当前图表品种 + 当前 magic，避免同账户多 EA 相互触发落袋。
+double GetTrackedOpenPnl()
+{
+   double total = 0.0;
+   for (int i = PositionsTotal() - 1; i >= 0; i--){
+      long ticket = -1;
+      if (!SelectPositionByIndex(i, ticket)) continue;
+      if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if ((int)PositionGetInteger(POSITION_MAGIC) != MAGIC_NUMBER) continue;
+      total += PositionGetDouble(POSITION_PROFIT)
+               + PositionGetDouble(POSITION_SWAP)
+               + PositionGetDouble(POSITION_COMMISSION);
+   }
+   return total;
+}
+
+double GetTrackedClosedPnlSince(datetime fromTime, datetime toTime)
+{
+   if (fromTime <= 0 || toTime < fromTime || !HistorySelect(fromTime, toTime)) return 0.0;
+
+   double total = 0.0;
+   int deals = HistoryDealsTotal();
+   for (int i = 0; i < deals; i++){
+      ulong dealTicket = HistoryDealGetTicket(i);
+      if (dealTicket == 0) continue;
+      if (HistoryDealGetString(dealTicket, DEAL_SYMBOL) != _Symbol) continue;
+      if ((int)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != MAGIC_NUMBER) continue;
+      total += HistoryDealGetDouble(dealTicket, DEAL_PROFIT)
+               + HistoryDealGetDouble(dealTicket, DEAL_SWAP)
+               + HistoryDealGetDouble(dealTicket, DEAL_COMMISSION)
+               + HistoryDealGetDouble(dealTicket, DEAL_FEE);
+   }
+   return total;
+}
+
+double GetTrackedWeekDelta(datetime now)
+{
+   return GetTrackedClosedPnlSince(weekResetAt, now)
+          + GetTrackedOpenPnl()
+          - weekStartEquity;
+}
+
+bool GetCurrentWeekOpen(datetime now, datetime &openTime)
+{
+   long weekIdx = (long)((now - 345600) / 604800);
+   datetime mondayStart = (datetime)(weekIdx * 604800 + 345600);
+   bool found = false;
+   datetime earliestOpen = 0;
+
+   for (int dayOffset = 0; dayOffset <= 5; dayOffset++){
+      ENUM_DAY_OF_WEEK day = (ENUM_DAY_OF_WEEK)(dayOffset + 1);
+      for (uint session = 0; session < 16; session++){
+         datetime fromTime = 0;
+         datetime toTime = 0;
+         if (!SymbolInfoSessionTrade(_Symbol, day, session, fromTime, toTime)) break;
+         datetime candidate = mondayStart + dayOffset * 86400 + SessionSeconds(fromTime);
+         if (!found || candidate < earliestOpen){
+            earliestOpen = candidate;
+            found = true;
+         }
+      }
+   }
+
+   openTime = found ? earliestOpen : mondayStart;
+   return found;
+}
+
+bool InWeekStartDelayWindow()
+{
+   if (weekStartDelayHours <= 0) return false;
+   datetime weekOpen = 0;
+   GetCurrentWeekOpen(TimeCurrent(), weekOpen);
+   datetime allowNewCycleAt = weekOpen + (int)MathRound(weekStartDelayHours * 3600.0);
+   return TimeCurrent() < allowNewCycleAt;
+}
+
+bool InSoftCloseWindow()
+{
+   if (softCloseHours <= 0) return false;
+   datetime now = TimeCurrent();
+   datetime weekClose = 0;
+   GetCurrentWeekClose(now, weekClose);
+   datetime windowStart = weekClose - softCloseHours * 3600;
+   return (now >= windowStart && now < weekClose && SymbolTradeAllowed());
+}
+
+bool OpenBlockedNow()
+{
+   if (weekHalted) return true;
+   if (InWeekStartDelayWindow()) return true;
+   if (InSoftCloseWindow()) return true;
+   if (cutPauseUntil > 0 && TimeCurrent() < cutPauseUntil) return true;
+   // 重置 guard 窗口内不开新仓 (B1)
+   if (weekResetGuardUntil > 0 && TimeCurrent() < weekResetGuardUntil) return true;
+   return false;
+}
+
+// 返回 true = 周机制拦截 (已落袋/熔断/软着陆收工); false = 允许正常交易
+bool WeeklyGate()
+{
+   datetime now = TimeCurrent();
+   long wkNow = (long)((now - 345600) / 604800);
+
+   // 首次挂载或跨周休市后，必须等真实交易时段开启才建立 baseline。
+   if (!weekBaselineArmed){
+      curWeekIdx = wkNow;
+      if (!SymbolTradeAllowed()) return true;
+
+      weekStartEquity = GetTrackedOpenPnl();
+      weekBaselineArmed = true;
+      weekResetAt = now;
+      weekResetGuardUntil = (weekResetOnBoot && weekResetGuardSecs > 0)
+                            ? now + weekResetGuardSecs : 0;
+      weekHalted = false;
+      softMartinSeen = false;
+      printfPro("Boot baseline equity " + DoubleToString(weekStartEquity, 2) +
+                ", guard until " + TimeToString(weekResetGuardUntil));
+   }
+
+   // 跨周时先解除 armed；若仍休市则持续拦截，开市后的首个 tick 再建新基准。
+   if (wkNow != curWeekIdx){
+      curWeekIdx = wkNow;
+      weekBaselineArmed = false;
+      if (!SymbolTradeAllowed()) return true;
+
+      weekStartEquity = GetTrackedOpenPnl();
+      weekBaselineArmed = true;
+      weekResetAt = now;
+      weekResetGuardUntil = weekResetGuardSecs > 0 ? now + weekResetGuardSecs : 0;
+      weekHalted = false;
+      softMartinSeen = false;
+      printfPro("New week: baseline equity " + DoubleToString(weekStartEquity, 2) +
+                ", guard until " + TimeToString(weekResetGuardUntil));
+   }
+
+   if (weekHalted) return true;
+
+   double delta = GetTrackedWeekDelta(now);
+   if (weekProfitLock > 0 && delta >= weekProfitLock){
+      printfPro("Week profit locked: +" + DoubleToString(delta, 2));
+      if (CloseAllOrders()){ ResetAllStatus(); weekHalted = true; }
+      return true;
+   }
+   if (weekLossHalt > 0 && delta <= -weekLossHalt){
+      printfPro("Week loss halt: " + DoubleToString(delta, 2));
+      if (CloseAllOrders()){ ResetAllStatus(); weekHalted = true; }
+      return true;
+   }
+
+   if (InSoftCloseWindow()){
+      if (seek > 0){
+         softMartinSeen = true;
+         return false; // 保留现有马丁组，只允许其自然退出。
+      }
+
+      // 没有马丁时（包括纯两张底仓、或马丁刚自然结束）立即清仓并停到下周。
+      printfPro(softMartinSeen
+                ? "Weekend soft close: martin cycle resolved"
+                : "Weekend soft close: close base hedge");
+      if (CloseAllOrders()){
+         ResetAllStatus();
+         weekHalted = true;
+      }
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   UpdateGUI(); // Update UI on every tick
+
+   // 风控与周末门必须先于所有会平仓/重开仓的状态逻辑。
+   if (CheckMaxLoss()) return;
+   if (WeeklyGate()) return;
+
    CheckLogicalBreakeven();
    TryResetLadderBaseIfNeeded();
    AutoReloadIfNeeded();
-   UpdateGUI(); // Update UI on every tick
-
-   // Safety Check: Always check max loss first
-   if (CheckMaxLoss()) return;
 
    if (isPaused){
     printfPro("Strategy paused", true);
@@ -1226,7 +1473,7 @@ void OnTick()
     printfPro("Error: handle orders manually and restart", true);
     return;
    }
-   
+
    RecoverMissingOrders();
 
     // Open positions
@@ -1246,6 +1493,10 @@ void OnTick()
 //+------------------------------------------------------------------+
 void CheckEntryConditions()
   {
+   if (OpenBlockedNow())
+   {
+      return;
+   }
    if (TimeCurrent() < openTime)
    {
       return;
@@ -1279,7 +1530,7 @@ void CheckEntryConditions()
         lastMartinBaseTicket = -1;
     }
 
-   
+
   }
 
 
@@ -1368,10 +1619,12 @@ void UpdateEAStatus(){
         return;
     }
 
-    //--- 情况3：订单数量异常（奇数且不是单边缺腿）
+    //--- 情况3：稳定态奇数订单不符合本策略结构，安全停机，禁止继续补单/加仓。
+    // 自身多步交易的短暂奇数态已由 AUTO_RELOAD_COOLDOWN 屏蔽。
     if (totalCount % 2 != 0){
-        // 零损/止损导致的临时奇数单：不重置任何状态，等待下一次自然恢复
-        printfPro("重载警告：订单数量奇数，跳过重载，buyCount=" + buyCount + ", sellCount=" + sellCount);
+        running = false;
+        printfPro("重载异常：检测到稳定态奇数订单，策略已安全停机，buyCount=" +
+                  buyCount + ", sellCount=" + sellCount);
         return;
     }
 
@@ -1423,6 +1676,17 @@ void UpdateEAStatus(){
 bool ShouldAutoReload()
 {
    datetime now = TimeCurrent();
+   // 2026-08-11 陈年票号强制重载: 任一记账票号已不在实仓 = 状态失真, 必须重扫。
+   // 不受「零损周期/交易动作冷却」抑制 —— 实测那两道门会让 lastSell/lastMartin 指向幽灵票的
+   // 状态永久卡死(seek 停在 1, 每 tick 刷平仓失败)。仅保留 MIN_INTERVAL 节流防每 tick 重扫。
+   if (isOpenPosition && now - lastAutoReloadTime > AUTO_RELOAD_MIN_INTERVAL){
+      if ((lastBuyOrderTick > 0 && !SelectPositionByTicket(lastBuyOrderTick)) ||
+          (lastSellOrderTick > 0 && !SelectPositionByTicket(lastSellOrderTick)) ||
+          (lastMartinOrderTick > 0 && !SelectPositionByTicket(lastMartinOrderTick))){
+         printfPro("AutoReload: 检测到陈年票号(记账票已不在实仓), 强制重扫");
+         return true;
+      }
+   }
    if (logicalBreakevenEnabled && (breakevenCycleActive || breakevenCount > 0)){
       return false;
    }
@@ -1493,6 +1757,9 @@ void ResetAllStatus(){
     breakevenResetDone = false;
     breakevenCycleMartinTicket = -1;
     breakevenCycleBaseTicket = -1;
+    nextRecoverAttemptTime = 0;
+    missingBuyConfirmedAt = 0;
+    missingSellConfirmedAt = 0;
 
     // 清空马丁订单数组
     for (int i = 0; i < ArraySize(martinOrders); i++){
@@ -1727,7 +1994,7 @@ void CheckAddAndTakeProfitConditions() {
       if (martinBreakevenProfit > 0){
          ApplyMartinBreakevenStops();
       }
-      if (calcTotalMartinOrdersProfit() >= 0 && closeMartinOrders()){
+      if (calcTotalMartinOrdersProfit() >= martinExitProfit && closeMartinOrders()){
          followType = -1;
          seek = 0;
          martinOrderCount = 0;
@@ -1738,17 +2005,20 @@ void CheckAddAndTakeProfitConditions() {
          return;
       }
    }
- 
+
+   // 软着陆窗口内禁止爬梯换仓和新马丁；上面的自然退出检查仍保留。
+   if (InSoftCloseWindow()) return;
+
    if (seek == 0 && followType == POSITION_TYPE_BUY && SelectPositionByTicket(lastSellOrderTick) && PositionGetDouble(POSITION_PROFIT) >= 0){
       followType = -1;
       printfPro("Lower boundary crossed, reset ladder direction");
    }
-    
+
    if (seek == 0 && followType == POSITION_TYPE_SELL && SelectPositionByTicket(lastBuyOrderTick) && PositionGetDouble(POSITION_PROFIT) >= 0){
       followType = -1;
       printfPro("Upper boundary crossed, reset ladder direction");
    }
-   
+
    bool ladderPaused = breakevenCycleActive;
 
    // ladder up
@@ -1769,7 +2039,7 @@ void CheckAddAndTakeProfitConditions() {
          printfPro("Ladder up close failed #" + GetLastError());
       }
    }
-   
+
    // ladder down followType == -1 || followType == POSITION_TYPE_SELL
    else if(!ladderPaused && followType != POSITION_TYPE_BUY && SelectPositionByTicket(lastSellOrderTick) && (PositionGetDouble(POSITION_PRICE_OPEN) - GetAsk()) / PositionGetDouble(POSITION_PRICE_OPEN) * 100 >= step){
       PrintPositionInfo();
@@ -1788,7 +2058,7 @@ void CheckAddAndTakeProfitConditions() {
          printfPro("Ladder down close failed #" + GetLastError());
       }
    }
-   
+
    // sell martin - 向下爬梯时开SELL马丁单
    else if (followType == POSITION_TYPE_BUY){
       long ladderTicket = lastBuyOrderTick;
@@ -1811,9 +2081,15 @@ void CheckAddAndTakeProfitConditions() {
                             + PositionGetDouble(POSITION_SWAP)
                             + PositionGetDouble(POSITION_COMMISSION);
       }
-      // 向下爬梯：SELL base亏损达到马丁距离 && BUY base亏损超过滤波器距离（两张base均浮亏）
-      if (ladderPrice > 0 && martinBasePrice > 0 &&
-          (martinBasePrice - GetAsk()) / martinBasePrice * 100 <= 0 - martinInterval &&
+      // 马丁矩离参照：seek>0 时以"最后一张马丁单"的开仓价为准(不再用会随爬梯/重载漂移的 base 价)，
+      // 杜绝锚点漂到远价位老 base 导致在错误价位连开马丁(2026-06-30 修)
+      double martinRefPrice = martinBasePrice;
+      if (seek > 0 && lastMartinOrderTick > 0 && SelectPositionByTicket(lastMartinOrderTick)){
+         martinRefPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      }
+      // 向下爬梯：SELL 端亏损达到马丁距离(以最后马丁为参照) && BUY base亏损超过滤波器距离（两张base均浮亏）
+      if (ladderPrice > 0 && martinBasePrice > 0 && martinRefPrice > 0 &&
+          (martinRefPrice - GetAsk()) / martinRefPrice * 100 <= 0 - martinInterval &&
           (GetBid() - ladderPrice) / ladderPrice * 100 <= 0 - filter &&
           ladderProfit < 0 && martinBaseProfit < 0){
 
@@ -1887,7 +2163,37 @@ void CheckAddAndTakeProfitConditions() {
          if (martinLots <= 0){
             martinLots = firstLots * 2;
          }
+         if (martinLotCap > 0 && martinLots > martinLotCap){
+            printfPro("MartinLotCap: " + DoubleToString(martinLots,2) + " -> " + DoubleToString(martinLotCap,2));
+            martinLots = martinLotCap;
+         }
          Sleep(500); // broker anti-scalping: delay between sell base and sell martin (fixes 5/7 22x reject loop)
+         // 2026-07-14 v1.04 防贴脸护栏：马丁落地前按「实际将成交价 vs 锚点」复核层间距。
+         // 入口判定已保证 ≥martinInterval，此处不一致 = 锚点在判定与落地之间被改（未知路径漂移），
+         // 宁可回滚刚开的 base 跳过本层，也不在贴脸位置堆双倍手数。触发即打 MartinSpacingGuard 日志。
+         if (seek > 0){
+            double guardRef = martinRefPrice;
+            if (lastMartinOrderTick > 0 && SelectPositionByTicket(lastMartinOrderTick)){
+               guardRef = PositionGetDouble(POSITION_PRICE_OPEN); // 重读，防 Sleep 期间状态被改
+            }
+            double guardGap = (guardRef > 0) ? MathAbs(GetBid() - guardRef) / guardRef * 100.0 : -1;
+            if (guardGap >= 0 && guardGap < martinInterval * 0.5){
+               printfPro("MartinSpacingGuard: 拦截贴脸Sell martin gap=" + DoubleToString(guardGap, 4) +
+                         "% < " + DoubleToString(martinInterval * 0.5, 2) + "%, 回滚base跳过本层");
+               lastSellMartinFailTime = TimeCurrent();
+               sellMartinFailCount++;
+               if (ClosePositionByTicket(newSellBase)){
+                  lastSellOrderTick = prevSellBase;
+                  lastMartinBaseTicket = prevMartinBase;
+                  martinOrderCount--;
+                  martinOrders[martinOrderCount] = -1;
+               }else{
+                  printfPro("Rollback sell base failed #" + GetLastError());
+               }
+               lastMartinOrderTick = prevMartinTick;
+               return;
+            }
+         }
          long newMartinTicket = SendMarketOrder(ORDER_TYPE_SELL, martinLots, "Sell martin");
          if (newMartinTicket != -1){
             if (martinOrderCount >= ArraySize(martinOrders)){
@@ -1922,7 +2228,7 @@ void CheckAddAndTakeProfitConditions() {
          }
       }
    }
-   
+
    // buy martin - 向上爬梯时开BUY马丁单
    else if (followType == POSITION_TYPE_SELL){
       long ladderTicket = lastSellOrderTick;
@@ -1945,9 +2251,15 @@ void CheckAddAndTakeProfitConditions() {
                             + PositionGetDouble(POSITION_SWAP)
                             + PositionGetDouble(POSITION_COMMISSION);
       }
-      // 向上爬梯：BUY base亏损达到马丁距离 && SELL base亏损超过滤波器距离（两张base均浮亏）
-      if (ladderPrice > 0 && martinBasePrice > 0 &&
-          (GetBid() - martinBasePrice) / martinBasePrice * 100 <= 0 - martinInterval &&
+      // 马丁矩离参照：seek>0 时以"最后一张马丁单"的开仓价为准(不再用会随爬梯/重载漂移的 base 价)，
+      // 杜绝锚点漂到远价位老 base 导致在错误价位连开马丁(2026-06-30 修)
+      double martinRefPrice = martinBasePrice;
+      if (seek > 0 && lastMartinOrderTick > 0 && SelectPositionByTicket(lastMartinOrderTick)){
+         martinRefPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      }
+      // 向上爬梯：BUY 端亏损达到马丁距离(以最后马丁为参照) && SELL base亏损超过滤波器距离（两张base均浮亏）
+      if (ladderPrice > 0 && martinBasePrice > 0 && martinRefPrice > 0 &&
+          (GetBid() - martinRefPrice) / martinRefPrice * 100 <= 0 - martinInterval &&
           (ladderPrice - GetAsk()) / ladderPrice * 100 <= 0 - filter &&
           ladderProfit < 0 && martinBaseProfit < 0){
 
@@ -1989,7 +2301,7 @@ void CheckAddAndTakeProfitConditions() {
          }
          martinOrders[martinOrderCount] = prevBuyBase;
          martinOrderCount ++;
-               
+
          // add tracking order
          long newBuyBase = SendMarketOrder(ORDER_TYPE_BUY, firstLots, "Buy base");
          if (newBuyBase == -1){
@@ -2022,7 +2334,35 @@ void CheckAddAndTakeProfitConditions() {
          if (martinLots2 <= 0){
             martinLots2 = firstLots * 2;
          }
+         if (martinLotCap > 0 && martinLots2 > martinLotCap){
+            printfPro("MartinLotCap: " + DoubleToString(martinLots2,2) + " -> " + DoubleToString(martinLotCap,2));
+            martinLots2 = martinLotCap;
+         }
          Sleep(500); // broker anti-scalping: delay between buy base and buy martin (fixes 5/7 22x reject loop)
+         // 2026-07-14 v1.04 防贴脸护栏（同 Sell 侧，buy 按 Ask 落地价复核）
+         if (seek > 0){
+            double guardRef2 = martinRefPrice;
+            if (lastMartinOrderTick > 0 && SelectPositionByTicket(lastMartinOrderTick)){
+               guardRef2 = PositionGetDouble(POSITION_PRICE_OPEN); // 重读，防 Sleep 期间状态被改
+            }
+            double guardGap2 = (guardRef2 > 0) ? MathAbs(GetAsk() - guardRef2) / guardRef2 * 100.0 : -1;
+            if (guardGap2 >= 0 && guardGap2 < martinInterval * 0.5){
+               printfPro("MartinSpacingGuard: 拦截贴脸Buy martin gap=" + DoubleToString(guardGap2, 4) +
+                         "% < " + DoubleToString(martinInterval * 0.5, 2) + "%, 回滚base跳过本层");
+               lastBuyMartinFailTime = TimeCurrent();
+               buyMartinFailCount++;
+               if (ClosePositionByTicket(newBuyBase)){
+                  lastBuyOrderTick = prevBuyBase;
+                  lastMartinBaseTicket = prevMartinBase2;
+                  martinOrderCount--;
+                  martinOrders[martinOrderCount] = -1;
+               }else{
+                  printfPro("Rollback buy base failed #" + GetLastError());
+               }
+               lastMartinOrderTick = prevMartinTick2;
+               return;
+            }
+         }
          long newMartinTicket2 = SendMarketOrder(ORDER_TYPE_BUY, martinLots2, "Buy martin");
          if (newMartinTicket2 != -1){
             if (martinOrderCount >= ArraySize(martinOrders)){
@@ -2058,7 +2398,7 @@ void CheckAddAndTakeProfitConditions() {
          }
       }
    }
-   
+
 }
 
 
@@ -2071,22 +2411,52 @@ double CalculateBuyVolume() {
 // 关闭所有马丁单的函数
 bool closeMartinOrders() {
    bool success = true;
-   for (int i= 0; i < martinOrderCount; i ++) 
+   for (int i= 0; i < martinOrderCount; i ++)
    {
       if (martinOrders[i] != -1){
          if (!ClosePositionByTicket(martinOrders[i])){
-            success = false;
+            // 缺脚根因修复：仓位若已不存在(被零损/手动/broker平掉, err 4753)，当作已平、跳过，
+            // 避免 closeMartinOrders 反复对幽灵单平仓失败→#4753 死循环(2026-07-01 修)
+            if (!SelectPositionByTicket(martinOrders[i])){
+               martinOrders[i] = -1;
+            } else {
+               success = false;
+            }
          }
       }
    }
-    
+
    if (!success){
       printfPro("OrderClose failed with error #" + GetLastError());
       return false;
    }
 
+   // 周末软着陆中马丁组回正后直接清掉所有剩余仓位，不再重开一张 base。
+   if (InSoftCloseWindow()){
+      if (!CloseAllOrders()){
+         printfPro("Weekend soft close: remaining positions close failed #" + GetLastError());
+         return false;
+      }
+      seek = 0;
+      martinOrderCount = 0;
+      lastMartinBaseTicket = -1;
+      for (int k = 0; k < ArraySize(martinOrders); k++) martinOrders[k] = -1;
+      breakevenCycleActive = false;
+      breakevenResetDone = false;
+      breakevenCycleMartinTicket = -1;
+      breakevenCycleBaseTicket = -1;
+      return true;
+   }
+
    if (followType == POSITION_TYPE_BUY){
-      if (!ClosePositionByTicket(lastSellOrderTick)){
+      // 2026-08-11 幽灵票守卫: 记账的 sell base 已不在实仓(外部平仓/换挂接管遗留的陈年票)时,
+      // 旧代码 return false → closeMartinOrders 永远走不完 → seek 卡死 + 每 tick 刷
+      // "Close sell base failed #4753"(MT5-2 实测一天 13 万行)。与「Reset ladder buy base:
+      // 持仓已不存在」同款处理: 跳过平仓直接重开。
+      if (!SelectPositionByTicket(lastSellOrderTick)){
+         printfPro("Close martin: sell base 持仓已不存在，跳过平仓直接重开");
+      }
+      else if (!ClosePositionByTicket(lastSellOrderTick)){
          printfPro("Close sell base failed #" + GetLastError());
          return false;
       }
@@ -2097,7 +2467,11 @@ bool closeMartinOrders() {
          return false;
       }
    }else if (followType == POSITION_TYPE_SELL){
-      if (!ClosePositionByTicket(lastBuyOrderTick)){
+      // 幽灵票守卫(同上, buy 侧)
+      if (!SelectPositionByTicket(lastBuyOrderTick)){
+         printfPro("Close martin: buy base 持仓已不存在，跳过平仓直接重开");
+      }
+      else if (!ClosePositionByTicket(lastBuyOrderTick)){
          printfPro("Close buy base failed #" + GetLastError());
          return false;
       }
@@ -2115,11 +2489,17 @@ bool closeMartinOrders() {
    for (int j = 0; j < ArraySize(martinOrders); j++){
       martinOrders[j] = -1;
    }
+   // 爬梯冻结根因修复：平完马丁必须清「零损周期」标志，否则 breakevenCycleActive 卡 true →
+   // ladderPaused 永久为真 → 上下爬梯全冻(2026-07-01 修)
+   breakevenCycleActive = false;
+   breakevenResetDone = false;
+   breakevenCycleMartinTicket = -1;
+   breakevenCycleBaseTicket = -1;
    return success;
 }
 
 
-//计算马丁的综合成本                                           
+//计算马丁的综合成本
 double CalculateMartinOrdersTotalCost() {
     double totalCost = 0.0;
     double totalLots = 0.0;
@@ -2133,7 +2513,7 @@ double CalculateMartinOrdersTotalCost() {
             // 计算成本并累加到总成本
             totalCost += orderVolume * orderOpenPrice;
             totalLots += orderVolume;
-            
+
         }
     }
     /**
@@ -2169,7 +2549,7 @@ void printfPro(string text, bool once = false)
 double calcTotalMartinOrdersProfit()
 {
    double profit = 0;
-   for (int i= 0; i < martinOrderCount; i ++) 
+   for (int i= 0; i < martinOrderCount; i ++)
    {
          if (martinOrders[i] != -1 && SelectPositionByTicket(martinOrders[i])){
             profit += PositionGetDouble(POSITION_PROFIT)
@@ -2188,13 +2568,13 @@ double calcTotalMartinOrdersProfit()
                 + PositionGetDouble(POSITION_COMMISSION);
    }
 
-   return profit; 
+   return profit;
 }
 
 //计算订单总数
 int calcTotalOrders(int openType = -1){
    int count = 0;
-   for (int i= PositionsTotal() - 1; i >= 0; i--) 
+   for (int i= PositionsTotal() - 1; i >= 0; i--)
    {
       long ticket = -1;
       if (SelectPositionByIndex(i, ticket))
@@ -2208,7 +2588,7 @@ int calcTotalOrders(int openType = -1){
          }
       }
     }
-    return count;                 
+    return count;
 }
 
 
@@ -2249,50 +2629,67 @@ bool CheckMaxLoss()
       }
    }
    if (totalProfit <= 0 - maxLoss){
+      // 闭市(10018)等平仓失败场景的重试节流: 避免每 tick 重复触发刷日志
+      static datetime nextMaxLossRetry = 0;
+      if (TimeCurrent() < nextMaxLossRetry){
+         return false;
+      }
       printfPro("Max loss triggered, total floating P/L: " + DoubleToString(totalProfit, 2));
-      CloseAllOrders();
-      ResetAllStatus();
-      return true;
+      if (CloseAllOrders()){
+         ResetAllStatus();
+         if (cutCooldownHours > 0){
+            cutPauseUntil = TimeCurrent() + (int)(cutCooldownHours * 3600.0);
+            printfPro("Cut cooldown until " + TimeToString(cutPauseUntil));
+         }
+         return true;
+      }
+      // 平仓未全部成功(典型: 闭市 retcode 10018) → 状态不能重置!
+      // 否则持仓成孤儿(爬梯/马丁/重载都不认) + 浮亏仍超限每tick重复触发死循环
+      // (2026.06.05 一年回测实证: 割肉撞上闭市, 状态被重置, 满仓拖过周末 −1008→−1108)。
+      // 保留全部 ticket 跟踪, 30 秒后重试, 开市第一时间平掉。
+      printfPro("Max loss: 部分平仓失败(可能闭市), 状态保留待重试, 30s 后再试");
+      nextMaxLossRetry = TimeCurrent() + 30;
+      return false;
    }
    return false;
 }
 
 bool IsNewsTime(string &newsTitle) {
    if(!newsFilterEnabled) return false;
-   
+
    datetime now = TimeCurrent();
    datetime start = now - newsAfterMinutes * 60;
    datetime end = now + newsBeforeMinutes * 60;
-   
+
    MqlCalendarValue values[];
-   
+
    if(CalendarValueHistory(values, start, end, NULL, NULL)) {
       for(int i=0; i<ArraySize(values); i++) {
          MqlCalendarEvent event;
          if(CalendarEventById(values[i].event_id, event)) {
-             
+
              bool importanceMatch = false;
              if(newsHighImportance && event.importance == CALENDAR_IMPORTANCE_HIGH) importanceMatch = true;
              if(newsMediumImportance && event.importance == CALENDAR_IMPORTANCE_MODERATE) importanceMatch = true;
-             
+
              if(!importanceMatch) continue;
-             
+
              // Get currency from country
              MqlCalendarCountry country;
              string eventCurrency = "";
              if(CalendarCountryById(event.country_id, country)){
                  eventCurrency = country.currency;
              }
-             
+
              string base = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
              string profit = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT);
-             
+
              if(StringFind(eventCurrency, base) < 0 && StringFind(eventCurrency, profit) < 0) {
-                 continue; 
+                 continue;
              }
-             
+
              // Get event name
-             newsTitle = event.name; 
+             newsTitle = event.name;
              return true;
          }
       }
@@ -2302,11 +2699,19 @@ bool IsNewsTime(string &newsTitle) {
 
 bool CheckMartinConditions(string &reason)
 {
+   if (InSoftCloseWindow()){
+      reason = "Weekend soft-landing window";
+      return false;
+   }
+   if (cutPauseUntil > 0 && TimeCurrent() < cutPauseUntil){
+      reason = "Cut cooldown";
+      return false;
+   }
    if (!martinEnabled){
       reason = "Martin disabled";
       return false;
    }
-   
+
    string newsTitle = "";
    if (IsNewsTime(newsTitle)){
       reason = "News Event: " + newsTitle;
@@ -2342,35 +2747,63 @@ bool CheckMartinConditions(string &reason)
 }
 
 void RecoverMissingOrders() {
-    if (!isOpenPosition) return;
+    if (!isOpenPosition || InSoftCloseWindow() || weekHalted) return;
 
     datetime now = TimeCurrent();
-    if (now < nextRecoverAttemptTime){
-        return;
-    }
+    if (now < nextRecoverAttemptTime) return;
     bool attempted = false;
-    
-    // Recovery for Failed Open (Ticket is -1)
+
     if (lastBuyOrderTick == -1) {
-        // Only recover if market is likely open (simple check? or just try)
-        // We just try. If it fails again, it logs error and retry next tick.
-        printfPro("Missing Buy Leg (Ticket -1). Attempting recovery...");
-        lastBuyOrderTick = SendMarketOrder(ORDER_TYPE_BUY, firstLots, "Buy base recovery");
-        if(lastBuyOrderTick > 0) printfPro("Buy Leg Recovered: #" + IntegerToString(lastBuyOrderTick));
-        attempted = true;
+        long existingBuy = FindLatestBaseTicketByType(POSITION_TYPE_BUY);
+        if (existingBuy > 0) {
+            lastBuyOrderTick = existingBuy;
+            missingBuyConfirmedAt = 0;
+            printfPro("Buy Leg 实仓已存在, 认领 #" + IntegerToString(existingBuy) + ", 取消 recovery 补开");
+        } else if (missingBuyConfirmedAt == 0) {
+            missingBuyConfirmedAt = now;
+            nextRecoverAttemptTime = now + RECOVER_CONFIRM_SECONDS;
+            printfPro("Missing Buy Leg: 等待二次确认");
+        } else if (now - missingBuyConfirmedAt >= RECOVER_CONFIRM_SECONDS) {
+            existingBuy = FindLatestBaseTicketByType(POSITION_TYPE_BUY);
+            if (existingBuy > 0) {
+                lastBuyOrderTick = existingBuy;
+            } else {
+                lastBuyOrderTick = SendMarketOrder(ORDER_TYPE_BUY, firstLots, "Buy base recovery");
+                attempted = true;
+                if (lastBuyOrderTick > 0) printfPro("Buy Leg Recovered: #" + IntegerToString(lastBuyOrderTick));
+            }
+            missingBuyConfirmedAt = 0;
+        }
+    } else {
+        missingBuyConfirmedAt = 0;
     }
 
-    if (attempted) Sleep(500); // broker anti-scalping: delay before opposite leg
     if (lastSellOrderTick == -1) {
-        printfPro("Missing Sell Leg (Ticket -1). Attempting recovery...");
-        lastSellOrderTick = SendMarketOrder(ORDER_TYPE_SELL, firstLots, "Sell base recovery");
-        if(lastSellOrderTick > 0) printfPro("Sell Leg Recovered: #" + IntegerToString(lastSellOrderTick));
-        attempted = true;
+        long existingSell = FindLatestBaseTicketByType(POSITION_TYPE_SELL);
+        if (existingSell > 0) {
+            lastSellOrderTick = existingSell;
+            missingSellConfirmedAt = 0;
+            printfPro("Sell Leg 实仓已存在, 认领 #" + IntegerToString(existingSell) + ", 取消 recovery 补开");
+        } else if (missingSellConfirmedAt == 0) {
+            missingSellConfirmedAt = now;
+            nextRecoverAttemptTime = now + RECOVER_CONFIRM_SECONDS;
+            printfPro("Missing Sell Leg: 等待二次确认");
+        } else if (now - missingSellConfirmedAt >= RECOVER_CONFIRM_SECONDS) {
+            existingSell = FindLatestBaseTicketByType(POSITION_TYPE_SELL);
+            if (existingSell > 0) {
+                lastSellOrderTick = existingSell;
+            } else {
+                lastSellOrderTick = SendMarketOrder(ORDER_TYPE_SELL, firstLots, "Sell base recovery");
+                attempted = true;
+                if (lastSellOrderTick > 0) printfPro("Sell Leg Recovered: #" + IntegerToString(lastSellOrderTick));
+            }
+            missingSellConfirmedAt = 0;
+        }
+    } else {
+        missingSellConfirmedAt = 0;
     }
 
-    if (attempted){
-        nextRecoverAttemptTime = now + RECOVER_MIN_INTERVAL;
-    }
+    if (attempted) nextRecoverAttemptTime = now + RECOVER_MIN_INTERVAL;
 }
 
 //+------------------------------------------------------------------+
@@ -2429,12 +2862,12 @@ void CreateGUI()
    int btnHeight = 30;
    int xBase = 140;
    int yBase = 40;
-   
+
    CreateButton("BtnReload", "Reload EA State", CORNER_RIGHT_LOWER, xBase, yBase + (btnHeight + 5) * 3, btnWidth, btnHeight);
    CreateButton("BtnPause", "Pause Strategy", CORNER_RIGHT_LOWER, xBase, yBase + (btnHeight + 5) * 2, btnWidth, btnHeight);
    CreateButton("BtnMartin", "Martin Switch", CORNER_RIGHT_LOWER, xBase, yBase + (btnHeight + 5) * 1, btnWidth, btnHeight);
    CreateButton("BtnMagic", "Ignore Magic", CORNER_RIGHT_LOWER, xBase, yBase, btnWidth, btnHeight);
-   
+
    UpdateButtonState();
 }
 
@@ -2482,7 +2915,7 @@ void UpdateButtonState()
    SetButtonState("BtnPause", isPaused ? "Resume Strategy" : "Pause Strategy", isPaused ? COLOR_BTN_OFF : COLOR_BTN_ON);
    SetButtonState("BtnMartin", martinEnabled ? "Martin ON" : "Martin OFF", martinEnabled ? COLOR_BTN_ON : COLOR_BTN_OFF);
    SetButtonState("BtnMagic", ignoreMagicNumber ? "Ignore Magic: ON" : "Ignore Magic: OFF", ignoreMagicNumber ? COLOR_BTN_ON : clrGray);
-   ChartRedraw(); // force immediate repaint so MCP-driven color changes show without needing a tick
+   ChartRedraw(); // force immediate repaint after local panel state changes
 }
 
 void SetButtonState(string name, string text, color bgColor)
@@ -2498,20 +2931,20 @@ void UpdateGUI()
    string direction = "None";
    if(followType == POSITION_TYPE_BUY) direction = "BUY";
    else if(followType == POSITION_TYPE_SELL) direction = "SELL";
-   
+
    double atr = GetAtrValue();
    double price = (GetBid() + GetAsk()) / 2.0;
    double atrPct = (price > 0) ? (atr / price * 100) : 0;
-   
+
    double bollUpper = 0, bollMiddle = 0;
    double bollDev = 0;
    if (GetBollingerBands(bollUpper, bollMiddle) && bollMiddle > 0) {
       double std = (bollUpper - bollMiddle) / 2.0;
       if (std > 0) bollDev = MathAbs(price - bollMiddle) / std;
    }
-   
+
    double totalProfit = calcTotalMartinOrdersProfit();
-   
+
    // Update Labels
    ObjectSetString(0, UI_PREFIX + "LblInfo1", OBJPROP_TEXT, "Martin Level: " + IntegerToString(seek) + " / " + IntegerToString(maxMartinLevel));
    ObjectSetString(0, UI_PREFIX + "LblInfo2", OBJPROP_TEXT, "Direction: " + direction);
