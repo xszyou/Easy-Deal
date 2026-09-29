@@ -1,6 +1,6 @@
 # GMarket v1.082 策略说明
 
-> 基于开源 `GMarket.mq5` v1.082 的静态逻辑整理。EA 为 standalone 单文件：在 MT5 的输入参数窗口配置和编译运行，不依赖 EasyDeal 文件桥、外部 include 或第三方包。
+> 基于 GMarket v1.082 standalone EA 的公开行为整理。本仓库只发布编译后的 `GMarket.ex5`，不提供策略源码；EA 在 MT5 中直接安装运行，不依赖 EasyDeal 文件桥、外部 include 或第三方包。
 
 ## 核心逻辑
 
