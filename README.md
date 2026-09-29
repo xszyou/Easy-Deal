@@ -4,18 +4,16 @@
 
 就算有一套完全自动赚钱的工具，你也会经常盯着它。你跟专业交易员对比，差别在于是否看得懂。而EasyDeal 就是解决这个问题的一套框架，提供一组MCP工具，接入 openclaw、Claude Code, Fay等agent后，在MT5交易环境可以协同各种策略工作，监控策略的执行、为你解答各种问题、指导你做出突发处理，甚至直接帮你修改策略代码。
 
-- **核心交易端 (EA)**: 当前开源的 `GMarket.mq5` 为 **v1.082 standalone**：一个可直接由 MT5/MetaEditor 编译的单文件 EA，无 EasyDeal、OrderGuard 或第三方外部包依赖；仅使用 MT5 自带功能与经济日历。它执行双向开仓、梯子、马丁与风险控制，并提供图形化操作界面 (UI)。
+- **核心交易端 (EA)**: 当前发布的是 **v1.082 standalone** 的预编译 `GMarket.ex5`：复制到 MT5 的 `MQL5\Experts` 后即可运行，不包含策略源码；仅使用 MT5 自带功能与经济日历。它执行双向开仓、梯子、马丁与风险控制，并提供图形化操作界面 (UI)。
 - **智能监控端 (MCP Server)**: 由 `easydeal_mcp_server.py` 负责。它作为 AI Agent (如 openclaw、Claude Code, Fay) 的连接器，通过 MCP 协议提供实时的策略状态监控、异常告警、日志分析及一致性校验功能。
 
 这种架构确保了交易的稳定性（EA 独立运行，不受 Python 端影响），同时赋予了系统强大的 AI 扩展能力（通过 MCP 进行自然语言交互和智能风控）。
-
-下载注册直接体验（邀请码：SSR57M）：[易策随身 · 下载](https://easydeal.fay-agent.com/app/download)
 
 ## 主要特点
 
 ### 核心策略（EA、可更换）
 
-`GMarket.mq5` 可单独安装和运行；不安装 Python、MCP 或 EasyDeal 客户端也可使用 EA。Python 仅是本项目 MCP 监控端所需，非 EA 编译依赖。
+`GMarket.ex5` 可单独安装和运行；不安装 Python、MCP 或 EasyDeal 客户端也可使用 EA。Python 仅是本项目 MCP 监控端所需，非 EA 运行依赖。
 
 > **交易风险提示：** GMarket 包含对冲和马丁加仓逻辑，可能在剧烈波动、点差扩大、流动性不足或连续不利行情中产生快速且显著的亏损。请先在模拟账户和策略测试器验证，并自行设置手数、最大亏损、周盈亏限制及可承受风险；不构成投资建议，也不保证收益。
 
@@ -38,7 +36,7 @@
   - **技术信号**：RSI 超买超卖、MACD 金叉死叉提示。
 - **一致性校验**：每日自动比对 EA 交易日志与策略规则，生成执行合规性报告。
 - **Web API**：提供 HTTP 接口供其他系统调用。
-- **主动修改策略及参数**：若agent需要执行此类操作，通常会先获得主人的允许，代码修改前也先会备份，你也可以让agent恢复过往的版本。（注：目前已经的问题是，修改的代码经常需要人工编译，但大模型常常会认为已经完成了编译工作）
+- **EX5-only 发布**：本仓库只提供已编译的 EA；参数可在 MT5 输入窗口或 MCP 的运行时配置中调整，源码编辑与重新编译需要另行提供源码工程。
 - **per-EA 经验笔记**（2026-06 同步自商业版）：`record_experience` / `read_experience` 工具——AI 把人工介入原因、运作规律、教训、偏好追加进 `strategies/<EA>.experience.md`（一只 EA 一份、按日期分节），跨会话延续操盘经验；配合 agent 定时任务可做每日自动总结。
 - **EA 实时成绩单**：`get_ea_realtime_stats` 工具——按魔术号实时算每只 EA 的笔数 / 盈亏 / 最大回撤 / 今日表现 / 在仓情况，回撤口径与商业版排行榜一致。
 - **券商时区自动校正**：K 线与成交时间自动按券商服务器偏移换算成真北京时间（修「未来 K 线」问题）。
@@ -46,13 +44,9 @@
 
 # 联系我们
 
-商业客户端（电脑客户端 + 手机 App）已正式上线，下方二维码可直接扫码下载体验：
-
-![EasyDeal 商业客户端与 App](images/easydeal-banner.png)
-
 加入交流群一起讨论策略与踩坑：
 
-![image-20251201173859002](images/wechat.png)
+![Easy Deal 3 群二维码](images/wechat.jpg)
 
 ---
 
@@ -81,20 +75,20 @@
 
 开始算法交易之前，请确定已经完成MT5的安装及交易账号的注册。
 
-## 下载 mql5 源码
+## 下载 EA
 
-从任一开源仓库下载根目录的 `GMarket.mq5`（当前为 v1.082 standalone）。该 EA 是单文件，无 EasyDeal/外部包依赖，只需已安装的 MT5；MCP 功能另行按需配置。
+从任一开源仓库下载根目录的 `GMarket.ex5`（当前为 v1.082 standalone）。本仓库只发布编译后的 EA，不提供 `GMarket.mq5` 源码；只需已安装的 MT5 即可运行，MCP 功能另行按需配置。
 
 ```
 https://gitee.com/xszyou/easy-deal
 https://github.com/xszyou/Easy-Deal
 ```
 
-## 编译 mql5 源码
+## 安装 EX5
 
 ![讲义](<images/course1/section-03-01.png>)
 
-点击 MT5 菜单栏的“文件”→“打开数据文件夹”，将 `GMarket.mq5` 放入 `MQL5\Experts` 目录并双击打开。MetaEditor 中点击“编译”即可；无需复制 include、安装 EasyDeal 或其他外部包。编译后请在策略测试器或模拟账户先验证参数和风险控制。
+点击 MT5 菜单栏的“文件”→“打开数据文件夹”，打开 `MQL5\Experts`，复制 `GMarket.ex5` 后返回 MT5 导航栏刷新专家列表。无需安装 Python、EasyDeal 或 MetaEditor，也无需编译源码。请先在策略测试器或模拟账户验证参数和风险控制。
 
 ## 打开交易窗口
 
@@ -105,7 +99,7 @@ https://github.com/xszyou/Easy-Deal
 
 ![讲义](<images/course1/section-05-01.png>)
 
-此时，到导航栏，找到刚才编译的EA，双击附加到图表。附加的时候要注意勾选允许算法交易。确定后，点击上方的算法交易按钮，让算法交易开启起来。成功后你应该能够看到类似作者的窗口交易。注意，在非交易日，一般是节假日，没有行情报价从交易所过来，ea是不会运作的，也不会出现左下角的信息窗和右下角的按钮，附加ea后，等待交易时间到来即可。
+此时，到导航栏找到刚才复制的 EA，双击附加到图表。附加时请勾选允许算法交易，并点击上方的算法交易按钮。成功后可以看到策略窗口。非交易日没有行情报价时 EA 不会运作，附加后等待交易时间即可。
 ---
 
 # 
@@ -474,16 +468,16 @@ https://gitee.com/xszyou/easy-deal
 | 变量名                   | 默认值                                 | 作用                                                                              |
 | --------------------- | ----------------------------------- | ------------------------------------------------------------------------------- |
 | `EA_PROFILE_PATH`     | `monitor_profile.json`（脚本目录）        | 监控配置 JSON 文件路径，用于持久化 symbols/magic_numbers/max_loss 等设置                         |
-| `EA_SET_PATH`         | `../config.set`（相对脚本目录）             | EA 的 `.set` 参数文件路径；加载失败时会自动回退到 MT5 chart profile 或 EA 源码默认值                     |
+| `EA_SET_PATH`         | `../config.set`（相对脚本目录）             | EA 的 `.set` 参数文件路径；加载失败时会回退到 MT5 chart profile 或运行时参数                     |
 | `EA_SYMBOLS`          | `GOLD,GOLD#,XAUUSD,XAUUSDm,XAUUSDc` | 监控的交易品种白名单（逗号或分号分隔）                                                             |
 | `EA_MAGIC_NUMBERS`    | `999`（由 profile 默认值提供）              | 监控的 magic number 列表（逗号或分号分隔）                                                    |
 | `EA_MAGIC_NUMBER`     | 未设置                                 | 单个 magic number；仅当 `EA_MAGIC_NUMBERS` 未设置时生效                                    |
 | `EA_MAX_LOSS`         | `3000`                              | 最大浮亏金额告警阈值（账户货币）                                                                |
 | `EA_COMMENT_CONTAINS` | 空                                   | 订单备注白名单关键字（逗号或分号分隔），只监控备注包含其中任意关键字的持仓                                           |
 | `EA_COMMENT_EXCLUDES` | 空                                   | 订单备注黑名单关键字，备注命中任意关键字的持仓将被忽略                                                     |
-| `EA_FILE_PATH`        | 未设置                                 | EA 源码 `.mq5` 完整路径覆盖；未设置时依次尝试 MT5 chart profile 自动识别、`MQL5/Experts/` 目录递归查找、脚本目录 |
-| `EA_FILENAME`         | `GMarket.mq5`                       | EA 源码文件名，自动搜索时使用                                                                |
-| `METAEDITOR_PATH`     | 从 MT5 安装目录自动检测                      | `MetaEditor64.exe` 完整路径，用于编译 EA                                                 |
+| `EA_FILE_PATH`        | 未设置                                 | 可选的本地 `.mq5` 源码路径（仅在自行提供源码进行开发/分析时使用） |
+| `EA_FILENAME`         | 未设置                                 | 可选的本地源码文件名；EX5-only 发布无需设置                                                                |
+| `METAEDITOR_PATH`     | 从 MT5 安装目录自动检测                      | 仅在自行提供源码并需要编译时使用                                                 |
 
 ## 策略文档与对话上下文
 
