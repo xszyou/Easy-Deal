@@ -1,0 +1,106 @@
+{
+  "name": "easydeal-community",
+  "version": "0.1.0",
+  "description": "EasyDeal 社区版 — 开源的单机 MT5 AI 值守客户端（Claude Code / Codex + EasyDeal MCP）",
+  "main": "electron/main.js",
+  "scripts": {
+    "test": "node --test test/*.test.js && python -m unittest discover -s test",
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "pack": "electron-builder --dir",
+    "_kill_dev_python": "powershell -NoProfile -Command \"Get-CimInstance Win32_Process -Filter \\\"Name='python.exe' OR Name='pythonw.exe'\\\" | Where-Object { $_.ExecutablePath -like '*easydeal-community*python-runtime*' } | ForEach-Object { Write-Host 'killing dev python pid='$_.ProcessId; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\"",
+    "predist:win": "npm run _kill_dev_python",
+    "predist:win:nobump": "npm run _kill_dev_python",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:win:nobump": "electron-builder --win"
+  },
+  "author": "EasyDeal",
+  "license": "GPL-3.0-only",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.308",
+    "cron-parser": "^4.9.0",
+    "express": "^4.19.2"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/claude-code-win32-x64": "2.1.308"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.easydeal.community",
+    "productName": "EasyDeal-Community",
+    "copyright": "Copyright (c) 2026 EasyDeal contributors",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "src/**/*",
+      "assets/**/*",
+      "python/**/*",
+      "python-runtime/**/*",
+      "docs/**/*",
+      "mql5/**/*",
+      "bundled-eas/**/*",
+      "package.json",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+      "!**/node_modules/*.d.ts",
+      "!**/node_modules/.bin",
+      "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}",
+      "!.editorconfig",
+      "!**/._*",
+      "!**/{.DS_Store,.git,.hg,.svn,CVS,RCS,SCCS}",
+      "!**/{__pycache__,thumbs.db,.flowconfig,.idea,.vs,.nyc_output}",
+      "!**/{logs,cache_data,release}/**/*",
+      "!**/{*.log,.client.log}"
+    ],
+    "asarUnpack": [
+      "python/**/*",
+      "python-runtime/**/*",
+      "node_modules/@anthropic-ai/claude-code/**/*",
+      "assets/tray.ico",
+      "assets/tray.png",
+      "assets/tray@2x.png",
+      "mql5/**/*",
+      "bundled-eas/**/*",
+      "docs/**/*"
+    ],
+    "win": {
+      "icon": "assets/app.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "executableName": "EasyDealCommunity",
+      "artifactName": "EasyDeal-Community-${version}-${arch}-setup.${ext}",
+      "publisherName": "Fay 数字人开源社区",
+      "verifyUpdateCodeSignature": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "EasyDeal 社区版",
+      "uninstallDisplayName": "EasyDeal 社区版",
+      "installerIcon": "assets/app.ico",
+      "uninstallerIcon": "assets/app.ico",
+      "deleteAppDataOnUninstall": false,
+      "include": "build/installer.nsh",
+      "runAfterFinish": true
+    },
+    "portable": {
+      "artifactName": "EasyDeal-Community-${version}-portable.${ext}"
+    }
+  }
+}

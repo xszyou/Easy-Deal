@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  EasyDeal master logo.
+  256x256 nominal canvas. Designed to read at every size from 16px (tray)
+  to 256px (Windows app icon). No external fonts — pure geometry.
+
+  Composition:
+    - Rounded-square container (12% radius), brand red #FF6363 with a
+      subtle gradient for depth on large renders.
+    - Negative-space upward chevron (arrow), white.
+    - Negative-space horizontal baseline below the arrow — reads as
+      "settled deal" / "confirmed line".
+    - Optional brand-glow ring on dark backgrounds (used by the topbar
+      mark via CSS box-shadow; the SVG itself stays clean).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#FF7373"/>
+      <stop offset="100%" stop-color="#E84F4F"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Container -->
+  <rect x="0" y="0" width="256" height="256" rx="56" ry="56" fill="url(#bg)"/>
+
+  <!-- Up chevron (arrow) — white, 22% stroke -->
+  <path d="
+    M 64 144
+    L 128 80
+    L 192 144
+  "
+  fill="none" stroke="#ffffff" stroke-width="28"
+  stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Baseline — flat, 8% stroke, slightly transparent so it reads as
+       "secondary axis" not part of the arrow -->
+  <line x1="64" y1="184" x2="192" y2="184"
+        stroke="#ffffff" stroke-opacity="0.92"
+        stroke-width="20" stroke-linecap="round"/>
+</svg>

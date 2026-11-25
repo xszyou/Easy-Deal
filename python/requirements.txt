@@ -1,0 +1,15 @@
+# Python deps for the bundled MCP servers and sidecars.
+#
+#   pip install -r python/requirements.txt
+#
+MetaTrader5>=5.0.45
+mcp>=1.0.0,<2
+croniter>=2.0.0
+pytz>=2024.1
+flask>=3.0.0
+requests
+psutil>=5.9
+httpx
+httpx-sse
+# window_capture/server.py — Windows screenshot tool
+Pillow>=9.5.0

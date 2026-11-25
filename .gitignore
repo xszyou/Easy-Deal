@@ -1,5 +1,47 @@
+# Node
+node_modules/
+package-lock.json.tmp
+
+# Build output
+release/
+dist/
+out/
+release-build.log
+
+# Bundled Python runtime — too big for git (~140 MB), and the wheels for
+# different platforms differ. Run `scripts/setup-python-runtime.ps1`
+# (Windows) to recreate it locally before `npm run dist:win`.
+python-runtime/
+
+# Logs / caches / runtime
+*.log
 __pycache__/
 *.py[cod]
+.client.err
+.client.log
+.client.pid
 logs/
+cache_data/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets
+.env
+
+# Stale top-level copies of settings.js / strategies.js (the live files
+# live under electron/). Avoid accidental drift.
+/settings.js
+/strategies.js
+
+# Test scratch
+_test_*.js
+
+# 自签 / 真代码签名证书。私钥绝对不能进 git。
+certs/
+*.pfx
+
+# Claude local settings
 .claude/
-done.bat

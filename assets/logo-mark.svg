@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  EasyDeal mark-only variant (no container).
+  Used in the topbar where the dark app background already provides
+  the container. Pure brand-red glyph; box-shadow / glow added via CSS.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <path d="M 64 144 L 128 80 L 192 144"
+        fill="none" stroke="#FF6363" stroke-width="32"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="64" y1="184" x2="192" y2="184"
+        stroke="#FF6363" stroke-width="22" stroke-linecap="round"/>
+</svg>

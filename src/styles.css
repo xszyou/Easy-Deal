@@ -1,0 +1,2821 @@
+/* EasyDeal — Raycast-inspired design language
+ * Tokens mirror the hepingjingying client to keep the visual family.
+ * Reference palette: #07080a bg, #f9f9f9 text, #FF6363 brand, #55b3ff info
+ */
+
+:root {
+  --bg: #07080a;
+  --surface-100: #101111;
+  --surface-200: #1b1c1e;
+  --border: hsl(195, 5%, 15%);
+  --border-soft: rgba(255, 255, 255, 0.06);
+  --border-softer: rgba(255, 255, 255, 0.08);
+
+  --text: #f9f9f9;
+  --text-2: #cecece;
+  --text-3: #9c9c9d;
+  --text-4: #6a6b6c;
+
+  --brand: #FF6363;
+  --brand-soft: rgba(255, 99, 99, 0.18);
+  --info: hsl(202, 100%, 67%);
+  --success: hsl(151, 59%, 59%);
+  --warn: hsl(43, 100%, 60%);
+  --danger: hsl(0, 75%, 65%);
+
+  --ring:
+    rgb(27, 28, 30) 0px 0px 0px 1px,
+    rgb(7, 8, 10) 0px 0px 0px 1px inset;
+  --btn-shadow:
+    rgba(255, 255, 255, 0.05) 0px 1px 0px 0px inset,
+    rgba(255, 255, 255, 0.25) 0px 0px 0px 1px,
+    rgba(0, 0, 0, 0.2) 0px -1px 0px 0px inset;
+
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 86px;
+
+  --font:
+    "Inter", "Inter Fallback", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono:
+    "GeistMono", ui-monospace, SFMono-Regular, "JetBrains Mono", "Cascadia Mono",
+    "Roboto Mono", Menlo, Monaco, monospace;
+
+  /* 0.3.54: 字号系统 — html root font-size 决定 rem 单位的基线。
+     body 用 1rem 跟随，几个 utility class 用 calc(1rem * 系数) 等比缩放。
+     直写 px 的旧 CSS 不会自动缩放（但绝大多数文字尺寸用 inherit / em 都跟）。 */
+  font-size: 14px;   /* md (default) */
+
+  /* 0.3.54: 字号变量 —— 直接给 utility class 用，跟随 data-font-size 自动放缩。
+     旧 CSS 里硬编码的 font-size: Npx 也批量改用这套。 */
+  --fs-xs: 10px;
+  --fs-sm: 11px;
+  --fs-md: 12px;
+  --fs-lg: 14px;
+  --fs-xl: 16px;
+
+  /* 0.3.54: 半透明叠加层（overlay）—— 用作 border / 浅色背景 / 分割线等微反差元素。
+     深色主题用 rgba(255,255,255,X) 提亮，浅色主题翻成 rgba(0,0,0,X) 加深，对比一致。 */
+  --overlay-1: rgba(255, 255, 255, 0.02);   /* 最浅 — 卡片底色微亮 */
+  --overlay-2: rgba(255, 255, 255, 0.04);
+  --overlay-3: rgba(255, 255, 255, 0.06);   /* border-soft 同款 */
+  --overlay-4: rgba(255, 255, 255, 0.08);   /* border-softer 同款 */
+  --overlay-5: rgba(255, 255, 255, 0.10);
+  --overlay-6: rgba(255, 255, 255, 0.15);   /* 最深 — 鼠标 hover 等 active 态 */
+}
+
+:root[data-font-size="sm"] {
+  font-size: 12px;
+  --fs-xs: 9px;
+  --fs-sm: 10px;
+  --fs-md: 11px;
+  --fs-lg: 12px;
+  --fs-xl: 14px;
+}
+:root[data-font-size="md"] {
+  font-size: 14px;
+  /* 用默认值（已在 :root 定义） */
+}
+:root[data-font-size="lg"] {
+  font-size: 16px;
+  --fs-xs: 11px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 18px;
+}
+
+/* 0.3.54: 浅色主题 — 反转色板 + 翻转 overlay 方向（白 → 黑）。
+   品牌色 / 状态色稍做调暗以保证白底上的对比度。 */
+:root[data-theme="light"] {
+  --topbar-bg: rgba(255, 255, 255, 0.88);
+
+  --bg: #ffffff;
+  --surface-100: #f5f6f8;
+  --surface-200: #ebedf0;
+  --border: #d8dde2;
+  --border-soft: rgba(0, 0, 0, 0.08);
+  --border-softer: rgba(0, 0, 0, 0.05);
+
+  --text:   #1a1d24;
+  --text-2: #3d434c;
+  --text-3: #6a7080;
+  --text-4: #9ca3ad;
+
+  --brand: #d63a32;            /* 原 #FF6363 在白底上太刺眼，调成接近 cherry red */
+  --brand-soft: rgba(214, 58, 50, 0.12);
+  --info:    hsl(202, 78%, 50%);
+  --success: hsl(151, 60%, 38%);
+  --warn:    hsl(33, 90%, 50%);
+  --danger:  hsl(0, 70%, 50%);
+
+  /* Overlay 翻转 —— 白底上要"压下去"反差才出来 */
+  --overlay-1: rgba(0, 0, 0, 0.02);
+  --overlay-2: rgba(0, 0, 0, 0.04);
+  --overlay-3: rgba(0, 0, 0, 0.06);
+  --overlay-4: rgba(0, 0, 0, 0.08);
+  --overlay-5: rgba(0, 0, 0, 0.10);
+  --overlay-6: rgba(0, 0, 0, 0.15);
+
+  --ring:
+    rgba(0, 0, 0, 0.1) 0px 0px 0px 1px,
+    rgba(255, 255, 255, 0.6) 0px 0px 0px 1px inset;
+  --btn-shadow:
+    rgba(0, 0, 0, 0.03) 0px 1px 0px 0px inset,
+    rgba(0, 0, 0, 0.1) 0px 0px 0px 1px,
+    rgba(0, 0, 0, 0.05) 0px -1px 0px 0px inset;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-feature-settings: "calt", "kern", "liga", "ss03";
+  font-weight: 500;
+  font-size: 1rem;   /* 0.3.54: 跟 root data-font-size 走（12/14/16px） */
+  letter-spacing: 0.2px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+body { min-height: 100vh; overflow-x: hidden; }
+a { color: inherit; text-decoration: none; }
+code, kbd { font-family: var(--font-mono); font-size: 12px; }
+kbd {
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #121212, #0d0d0d);
+  box-shadow:
+    rgba(0, 0, 0, 0.4) 0px 1.5px 0.5px 2.5px,
+    rgba(255, 255, 255, 0.1) 0px 1px 0px 0px inset,
+    rgba(0, 0, 0, 0.3) 0px -1px 0px 0px inset;
+  color: var(--text-2);
+}
+
+/* ---------------- Top Nav ---------------- */
+.topbar {
+  position: sticky; top: 0; z-index: 10;
+  /* 0.3.54: 主题感知 — 深色 rgba(7,8,10,.85) / 浅色 rgba(255,255,255,.85)。
+     之前硬编码深色 bg，浅色主题下 hover 时 tab 文字（取 --text=深色）写在
+     深色 topbar 上完全看不见。 */
+  background: var(--topbar-bg, rgba(7, 8, 10, 0.85));
+  backdrop-filter: saturate(180%) blur(14px);
+  -webkit-backdrop-filter: saturate(180%) blur(14px);
+  border-bottom: 1px solid var(--border-soft);
+}
+.topbar-inner {
+  max-width: 1600px;          /* widened from 1200px to fit 11 tabs */
+  margin: 0 auto;
+  padding: 12px 20px;          /* slightly tighter vertical/horizontal */
+  display: flex; align-items: center;
+  gap: 14px;                   /* tighter gap between groups */
+}
+.topbar-inner > .brand { flex-shrink: 0; }
+.topbar-inner > #mount-pulse,
+.topbar-inner > #wx-pulse { flex-shrink: 0; }
+.topbar-inner > .tabs {
+  flex: 1;                     /* take remaining width */
+  justify-content: flex-end;   /* tabs hug the right edge */
+  flex-wrap: nowrap;           /* never wrap; if too narrow, scroll */
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.15) transparent;
+}
+.topbar-inner > .tabs::-webkit-scrollbar { height: 4px; }
+.topbar-inner > .tabs::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.15); border-radius: 2px;
+}
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand-mark {
+  width: 10px; height: 10px;
+  border-radius: 2px;
+  background: var(--brand);
+  box-shadow: 0 0 12px rgba(255, 99, 99, 0.6);
+}
+/* Image-based logo mark used in the topbar (replaces the placeholder
+ * red square with the real generated icon). */
+.brand-mark-img {
+  width: 22px; height: 22px;
+  border-radius: 5px;
+  box-shadow: 0 0 14px rgba(255, 99, 99, 0.35);
+  flex-shrink: 0;
+  image-rendering: -webkit-optimize-contrast;
+}
+.brand-name {
+  font-size: 16px; font-weight: 600; letter-spacing: 0.3px;
+}
+.brand-sub {
+  font-size: var(--fs-md); font-weight: 500;
+  color: var(--text-4);
+  font-family: var(--font-mono);
+}
+
+/* MT5 mount-status pulse — sits between brand and tabs */
+/* 0.3.55: 全停按钮。永远可见的紧急入口。dimmed 状态（无任务跑）也能点 — 点了
+   会先 confirm，无任务时 toast 「没有需要停的任务」。色板用 danger 红，强提醒。 */
+.panic-stop-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(245, 99, 99, 0.4);
+  background: rgba(245, 99, 99, 0.12);
+  color: #ff6363;
+  font-family: var(--font-mono); font-size: var(--fs-sm);
+  font-weight: 500;
+  cursor: pointer; user-select: none;
+  flex-shrink: 0;     /* 0.3.92: 在 topbar 最右边时别被 tabs 挤变形 */
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+.panic-stop-btn:hover {
+  background: rgba(245, 99, 99, 0.22);
+  border-color: rgba(245, 99, 99, 0.6);
+}
+.panic-stop-btn:active {
+  transform: scale(0.96);
+  background: rgba(245, 99, 99, 0.32);
+}
+
+.mount-pulse {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-soft);
+  background: var(--surface-100);
+  font-family: var(--font-mono); font-size: var(--fs-sm);
+  color: var(--text-3);
+  cursor: default; user-select: none;
+  /* 0.3.19: 给 background / color / border 加平滑过渡，避免 5s 轮询切
+     class（live↔warn）时刺眼的瞬切。AI 在跑 compile / backtest 期间
+     改 MT5/Experts 文件 mtime 会让 is_stale 翻转 → 用户感知到「闪一闪」 */
+  transition: background-color 0.4s ease, color 0.4s ease, border-color 0.4s ease;
+}
+.mount-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--text-4);
+  transition: background-color 0.4s ease, box-shadow 0.4s ease;
+}
+.mount-pulse.live {
+  color: var(--success);
+  border-color: rgba(95, 201, 146, 0.28);
+  background: rgba(95, 201, 146, 0.08);
+}
+.mount-pulse.live .mount-dot {
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(95, 201, 146, 0.6);
+  /* 0.3.19: 删掉常驻 pulseDot 动画 — 用户反馈 topbar 一闪一闪。状态
+     恒定时不该有抢眼动效；颜色 + glow 足以区分状态。 */
+}
+.mount-pulse.warn {
+  color: var(--warn);
+  border-color: rgba(255, 188, 51, 0.32);
+  background: rgba(255, 188, 51, 0.08);
+}
+.mount-pulse.warn .mount-dot {
+  background: var(--warn);
+  box-shadow: 0 0 6px rgba(255, 188, 51, 0.6);
+}
+.mount-pulse.down {
+  color: var(--danger);
+  border-color: rgba(239, 68, 68, 0.32);
+  background: rgba(239, 68, 68, 0.08);
+}
+.mount-pulse.down .mount-dot {
+  background: var(--danger);
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+}
+.mount-pulse:hover { filter: brightness(1.15); }
+
+/* Account chip — top-right of the topbar */
+.account {
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 2px;
+  padding: 4px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-soft);
+  background: var(--surface-100);
+  min-width: 120px;
+  max-width: 180px;
+}
+.account-name {
+  font-size: var(--fs-md); color: var(--text);
+  letter-spacing: 0.2px;
+}
+.account-key {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+  letter-spacing: 0.5px;
+}
+
+.tabs { display: flex; align-items: center; gap: 2px; }
+.tab-btn {
+  font-family: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 6px 10px;            /* tighter horizontal padding */
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  white-space: nowrap;          /* never break Chinese labels mid-tab */
+  flex-shrink: 0;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active {
+  color: var(--text);
+  background: var(--surface-100);
+  border-color: var(--border-soft);
+}
+
+/* ---------------- Layout ---------------- */
+.content {
+  max-width: 1600px;          /* match topbar widening */
+  margin: 0 auto;
+  padding: 32px 24px 80px;
+  min-height: calc(100vh - 60px);
+}
+.tab-pane.hidden { display: none; }
+
+.section-head {
+  display: flex; align-items: baseline; gap: 12px;
+  margin-bottom: 14px;
+}
+.section-head h2 {
+  font-size: 20px; font-weight: 500; margin: 0; letter-spacing: 0.2px;
+}
+.section-head .sub {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--text-4);
+  font-weight: 400;
+}
+.section-head .spacer { flex: 1; }
+
+/* ---------------- Cards ---------------- */
+.card {
+  background: var(--surface-100);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: 22px 22px 20px;
+  margin-bottom: 16px;
+  box-shadow: var(--ring);
+}
+.card h2 {
+  margin: 0 0 6px;
+  font-size: 16px; font-weight: 500; letter-spacing: 0.2px;
+}
+.card .hint {
+  color: var(--text-3);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+  margin: 0 0 14px;
+}
+
+/* Three-column hint grid used at the top of "我的策略" to summarize
+ * the create / deploy / list workflow at a glance. */
+.hint-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin: 6px 0 16px;
+}
+/* 0.3.132: 之前用 rgba(0,0,0,0.25) 25% 黑色块 —— light 主题下跟下方白色表格脱节
+   (作者反馈「上面的背景色块和下面的统一一下」)。改成 theme-aware overlay-1 (2%)
+   极浅高亮 + border-soft 区隔，两个主题下都跟主体表格视觉协调，仍能看出「这是
+   3 个独立 hint 块」的分组。 */
+.hint-block {
+  background: var(--overlay-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+.hint-block .hint-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-2);
+  margin-bottom: 6px;
+  letter-spacing: 0.2px;
+}
+.hint-block ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-3);
+  font-size: var(--fs-md);
+  line-height: 1.65;
+}
+.hint-block ul li { margin-bottom: 2px; }
+.hint-block ul li:last-child { margin-bottom: 0; }
+/* 0.3.131: light 主题下 rgba(0,0,0,0.4) 是 40% 黑色块，看着像「阴影脏污」（dark
+   主题下还行）。作者反馈：「白色主题这些阴影部分改成加粗」。改成 theme-aware
+   微高亮 + 加粗，两个主题下都干净。 */
+.hint-block code {
+  background: var(--overlay-1);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.hint-block strong { color: var(--text); font-weight: 500; }
+
+/* ---------------- Buttons ---------------- */
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 16px;
+  font-family: inherit;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--text);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: opacity 0.2s;
+  background: transparent;
+}
+.btn:hover { opacity: 0.7; }
+.btn.primary {
+  background: hsla(0, 0%, 100%, 0.92);
+  color: #18191a;
+  border-radius: var(--radius-pill);
+  padding: 9px 20px;
+  box-shadow: var(--btn-shadow);
+}
+.btn.primary:hover { opacity: 1; background: #ffffff; }
+.btn.ghost {
+  background: transparent;
+  border: 1px solid var(--overlay-5);
+  box-shadow: rgba(0, 0, 0, 0.03) 0px 7px 3px;
+}
+.btn.ghost:hover { opacity: 1; border-color: rgba(255, 255, 255, 0.18); }
+.btn.danger {
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+}
+.btn.danger:hover { opacity: 1; background: rgba(239, 68, 68, 0.08); }
+.btn.small { padding: 5px 12px; font-size: var(--fs-md); }
+
+/* 0.3.179: 「策略」表行 操作列 — 11 个按钮 flex wrap 排版.
+   之前 td 里 inline-block 自然 wrap, 行高乱 / 按钮间距不一致 / 对齐乱.
+   改成 flex wrap + gap 统一 + 右对齐 + max-width 强制折行, 视觉整齐. */
+.strategy-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;          /* 1.2.26: 回到「一行约 4 个, 多了自动折行」(用户要, 跟改版前一致), 不把列拉成一长条 */
+  justify-content: flex-end;
+  margin-left: auto;        /* 整体右对齐 cell */
+  max-width: 280px;         /* ~4 个按钮宽; 超出的按钮折到下一行。窄屏整表仍可经 #st-list 横向滚动 */
+}
+.strategy-actions .btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  white-space: nowrap;      /* 防按钮文字内部折行 */
+}
+/* 主操作行 + 「⋯ 更多」溢出菜单 —— 把低频/危险操作收进浮层, 列再窄也不挤爆 */
+.sa-primary { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
+.sa-more-wrap { position: relative; display: inline-flex; }
+.sa-more-btn { font-weight: 700; letter-spacing: 1px; }
+.sa-more-btn.sa-attn::after {            /* 缺策略说明等需提醒 → 角标红点 */
+  content: ''; position: absolute; top: 1px; right: 1px;
+  width: 6px; height: 6px; border-radius: 50%; background: var(--danger);
+}
+.sa-menu {                               /* fixed: 脱离表格/滚动容器, 高 DPI 下不被裁切 */
+  position: fixed; z-index: 3000; min-width: 172px;
+  background: var(--surface-200); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 4px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  display: flex; flex-direction: column; gap: 1px;
+}
+.sa-menu[hidden] { display: none; }
+.sa-menu .btn {
+  width: 100%; justify-content: flex-start; text-align: left;
+  border: none; background: transparent; box-shadow: none;
+  border-radius: var(--radius-sm); padding: 7px 10px; font-size: 12.5px;
+}
+.sa-menu .btn:hover:not([disabled]) { background: var(--surface-100); }
+.sa-menu .btn.danger { color: var(--danger); }
+.sa-sep { height: 1px; background: var(--border); margin: 4px 6px; }
+
+/* ---------------- Inputs ---------------- */
+input, select, textarea {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-md);
+  font-family: inherit;
+  font-weight: 500;
+  transition: border-color 0.15s;
+  outline: none;
+}
+input:focus, select:focus, textarea:focus { border-color: rgba(255, 255, 255, 0.22); }
+input::placeholder, textarea::placeholder { color: var(--text-4); }
+textarea {
+  resize: vertical; min-height: 84px;
+  font-family: var(--font-mono); font-size: var(--fs-md);
+  line-height: 1.55;
+}
+label {
+  color: var(--text-4); font-size: var(--fs-sm);
+  font-family: var(--font-mono); letter-spacing: 0.4px;
+  text-transform: uppercase;
+  display: block; margin-bottom: 6px;
+}
+.field { margin-bottom: 12px; }
+.row { display: flex; gap: 12px; align-items: center; }
+.row.between { justify-content: space-between; }
+.row.wrap { flex-wrap: wrap; }
+
+/* ---------------- Tables ---------------- */
+table.list {
+  width: 100%; border-collapse: collapse;
+  font-size: var(--fs-md);
+}
+table.list th {
+  text-align: left;
+  color: var(--text-4);
+  font-weight: 500;
+  font-size: var(--fs-sm);
+  font-family: var(--font-mono);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  white-space: nowrap;          /* 0.3.180: 表头标题不换行 (e.g.「收益因子」/「盈利日%」之前被强制拆成 2 行) */
+}
+table.list td {
+  padding: 12px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle;
+  color: var(--text-2);
+}
+table.list tr.expanded td { background: var(--overlay-1); }
+table.list tr.history-row td {
+  background: rgba(0, 0, 0, 0.35);
+  border-bottom: 1px solid var(--border-soft);
+  padding: 8px 16px 16px;
+}
+/* 0.3.111: 白色主题下 history-row 的 rgba(0,0,0,0.35) 蒙版 = 中灰 #a6a6a6 底，
+   叠上 --text-4 (#9ca3ad) 的「started / 耗时」label 跟 --text-3 timestamps 看不清。
+   改用 surface-100 浅白底；label 颜色提到 text-3 让对比上来。 */
+:root[data-theme="light"] table.list tr.history-row td {
+  background: var(--surface-100);
+}
+/* 1.2.25: 操作按钮全部平铺(去掉 ⋯ 折叠, 用户要求「和原来一样」)。表很宽 + body
+   overflow-x:hidden → 让 #st-list 自己横向滚动, 窄屏拉横向滚动条就能够到「操作」列所有按钮。
+   (1.2.23 试过把操作列 sticky 钉右, 但按钮全平铺后那列太宽、钉住会糊掉半屏, 故改回普通横滚) */
+#st-list { overflow-x: auto; }
+
+/* ---------------- Tags ---------------- */
+.tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  font-family: var(--font-mono);
+  letter-spacing: 0.4px;
+  background: var(--overlay-2);
+  color: var(--text-3);
+  border: 1px solid var(--border-soft);
+  white-space: nowrap;          /* 0.3.180: tag 文字不折行 (e.g.「有 · 6.9 KB」之前被挤成 2-3 行) */
+}
+.tag.ok       { background: rgba(95, 201, 146, 0.12); color: var(--success); border-color: rgba(95, 201, 146, 0.28); }
+.tag.error    { background: rgba(239, 68, 68, 0.12);  color: var(--danger);  border-color: rgba(239, 68, 68, 0.30); }
+.tag.skipped  { background: rgba(148, 163, 184, 0.10);color: var(--text-3);  }
+.tag.running  { background: rgba(255, 188, 51, 0.12); color: var(--warn);    border-color: rgba(255, 188, 51, 0.30); }
+.tag.disabled { background: transparent; color: var(--text-4); }
+.tag.cron     { background: var(--brand-soft); color: var(--brand); border-color: rgba(255, 99, 99, 0.30); }
+.tag.once     { background: rgba(85, 179, 255, 0.12); color: var(--info); border-color: rgba(85, 179, 255, 0.30); }
+
+/* ---------------- Toggle ---------------- */
+.toggle {
+  position: relative;
+  width: 34px; height: 20px;
+  background: var(--surface-200);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.toggle::after {
+  content: ''; position: absolute;
+  top: 2px; left: 2px;
+  width: 14px; height: 14px;
+  background: var(--text-3); border-radius: 50%;
+  transition: left 0.15s, background 0.15s;
+}
+.toggle.on { background: var(--brand-soft); border-color: rgba(255, 99, 99, 0.45); }
+.toggle.on::after { left: 16px; background: var(--brand); box-shadow: 0 0 6px rgba(255, 99, 99, 0.5); }
+
+/* ---------------- KV ---------------- */
+.kv {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 10px 18px;
+  font-size: var(--fs-md);
+}
+.kv .k {
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  align-self: center;
+}
+.kv .v {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  word-break: break-all;
+}
+
+/* ---------------- Code blocks ---------------- */
+pre.summary, pre.code {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+  color: var(--text-2);
+  overflow: auto;
+  max-height: 300px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+/* 0.3.111: 白色主题下 rgba(0,0,0,0.4) 蒙版 ≈ #999 灰底，叠 text-2 #3d434c 半看半不看。
+   改用 surface-200 浅灰白底 + 实色 border 让代码块在白底上轮廓清晰。 */
+:root[data-theme="light"] pre.summary,
+:root[data-theme="light"] pre.code {
+  background: var(--surface-200);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+/* ---------------- Empty state ---------------- */
+.empty {
+  color: var(--text-4);
+  text-align: center;
+  padding: 40px 12px;
+  font-size: var(--fs-md);
+  letter-spacing: 0.2px;
+}
+
+/* ---------------- Toast ---------------- */
+.toast {
+  position: fixed;
+  bottom: 28px; left: 50%; transform: translateX(-50%);
+  background: rgba(16, 17, 17, 0.92);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--border-soft);
+  padding: 11px 22px;
+  border-radius: var(--radius-pill);
+  box-shadow:
+    rgba(0, 0, 0, 0.4) 0px 12px 36px,
+    var(--ring);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  color: var(--text-2);
+  z-index: 100;
+  animation: toast-rise 0.2s ease-out;
+}
+@keyframes toast-rise {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+.toast.hidden { display: none; }
+.toast.error  { border-color: rgba(239, 68, 68, 0.35); color: var(--danger); }
+.toast.ok     { border-color: rgba(95, 201, 146, 0.35); color: var(--success); }
+
+/* ---------------- Hero ---------------- */
+.hero-tight {
+  padding: 8px 0 24px;
+}
+.hero-tight h1 {
+  font-size: 36px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.1;
+  margin: 0 0 12px;
+  font-feature-settings: "ss02", "ss08";
+}
+.lede {
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--text-2);
+  margin: 0;
+}
+.lede-dim { color: var(--text-4); }
+
+/* ---------------- Banner ---------------- */
+.banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 16px;
+  border-radius: var(--radius-md);
+  margin-bottom: 16px;
+  font-size: var(--fs-md);
+  background: rgba(85, 179, 255, 0.06);
+  border: 1px solid rgba(85, 179, 255, 0.18);
+  color: var(--text-2);
+}
+.banner-info { background: rgba(255, 188, 51, 0.06); border-color: rgba(255, 188, 51, 0.22); }
+.banner-warn { background: rgba(239, 68, 68, 0.07); border-color: rgba(239, 68, 68, 0.32); color: var(--text); }
+.banner-warn .banner-dot { background: var(--danger); box-shadow: 0 0 8px rgba(239, 68, 68, 0.6); }
+.banner-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 8px rgba(255, 188, 51, 0.6);
+}
+.banner code { color: var(--warn); }
+
+/* ---------------- Pill row (filters) ---------------- */
+.pill-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.pill {
+  font-family: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.pill:hover { color: var(--text); border-color: var(--overlay-6); }
+.pill.active {
+  color: var(--text);
+  background: var(--surface-100);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* ---------------- Rank badges ---------------- */
+.rank {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: var(--surface-200);
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-md); font-weight: 600;
+}
+.rank-gold   { background: linear-gradient(180deg, #fde68a, #d4a73c); color: #1a1300; box-shadow: 0 0 16px rgba(253, 230, 138, 0.3); }
+.rank-silver { background: linear-gradient(180deg, #e2e8f0, #94a3b8); color: #0f172a; box-shadow: 0 0 14px rgba(226, 232, 240, 0.25); }
+.rank-bronze { background: linear-gradient(180deg, #fdba74, #c2410c); color: #1a0900; box-shadow: 0 0 14px rgba(253, 186, 116, 0.25); }
+
+/* ---------------- Chat ---------------- */
+.chat-wrap {
+  display: flex; flex-direction: column;
+  /* 0.3.22: 之前 60+64=124px 算偏小（content padding 是 32+80=112，加 topbar
+     60 = 172），导致 .chat-wrap 比可用容器高 ~48px → body 也得滚一下 →
+     用户看到顶栏外面 + chat-stream 内 两条滚动条。改成 172px 严格匹配可用空间。 */
+  height: calc(100vh - 60px - 32px - 80px);
+  gap: 16px;
+}
+.chat-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.chat-head h2 { margin: 0; font-size: 18px; font-weight: 500; }
+.chat-head > div:first-child { min-width: 0; flex: 1; }
+.chat-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.chat-head-actions .btn { flex-shrink: 0; white-space: nowrap; }
+.chat-status {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm); letter-spacing: 0.4px;
+  color: var(--text-4);
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--overlay-2);
+}
+.chat-status.active {
+  color: var(--warn);
+  background: rgba(255, 188, 51, 0.12);
+  animation: pulse 1.5s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+/* 1.3.x 多会话切换条 */
+.chat-sessions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--overlay-4);
+}
+.chat-sessions-pills {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  flex: 1;
+  scrollbar-width: thin;
+}
+.chat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--overlay-4);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-md);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.chat-pill:hover { background: var(--overlay-2); }
+.chat-pill.active {
+  background: var(--accent, #e8811a);
+  border-color: var(--accent, #e8811a);
+  color: #fff;
+}
+.chat-pill-sub { opacity: 0.7; font-size: var(--fs-sm); font-family: var(--font-mono); }
+.chat-pill-busy {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #4caf50; animation: chatPillPulse 1s infinite;
+}
+@keyframes chatPillPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.chat-pill-badge {
+  margin-left: 4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #e05555;
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  font-weight: 700;
+}
+.chat-pill-del { margin-left: 3px; opacity: 0.55; font-weight: bold; }
+.chat-pill-del:hover { opacity: 1; color: #e05555; }
+.chat-sessions-add { flex: 0 0 auto; white-space: nowrap; }
+
+/* 1.5.1: AI 栏任务进度面板(读 CC 原生 TodoWrite) —— 仅有未完成项时常驻显示 */
+.chat-todos {
+  flex: 0 0 auto;
+  margin: 4px 4px 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface-100);
+  overflow: hidden;
+}
+.chat-todos-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+.chat-todos-head:hover { background: var(--surface-200); }
+.chat-todos-caret { font-size: 10px; color: var(--text-4); width: 10px; }
+.chat-todos-title { font-size: var(--fs-md); color: var(--text-2); font-weight: 500; }
+.chat-todos-count {
+  font-size: var(--fs-sm);
+  color: var(--text-4);
+  font-variant-numeric: tabular-nums;
+}
+.chat-todos-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 3px;
+  background: var(--surface-200);
+  overflow: hidden;
+}
+.chat-todos-bar-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--success);
+  transition: width 0.3s ease;
+}
+.chat-todos-list {
+  list-style: none;
+  margin: 0;
+  padding: 2px 10px 8px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+.chat-todo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 3px 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+.chat-todo-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.chat-todo-icon:hover { background: var(--surface-200); }
+.chat-todo-text { flex: 1 1 auto; color: var(--text-2); word-break: break-word; }
+.chat-todo-item.status-in_progress .chat-todo-text { color: var(--text); font-weight: 500; }
+.chat-todo-item.status-pending .chat-todo-icon { color: var(--text-4); }
+.chat-todo-item.status-pending .chat-todo-text { color: var(--text-3); }
+.chat-todo-item.status-completed .chat-todo-icon { color: var(--success); }
+.chat-todo-item.status-completed .chat-todo-text {
+  color: var(--text-4);
+  text-decoration: line-through;
+}
+/* 1.5.3: 手动增删改 —— 每项右侧的 编辑/删除 小按钮, 默认半透明, hover 该行才显眼 */
+.chat-todo-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  opacity: 0.35;
+  transition: opacity 0.15s ease;
+}
+.chat-todo-item:hover .chat-todo-actions { opacity: 1; }
+.chat-todo-edit, .chat-todo-del {
+  border: none;
+  background: transparent;
+  color: var(--text-4);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.chat-todo-edit:hover { background: var(--surface-200); color: var(--text-2); }
+.chat-todo-del:hover { background: var(--surface-200); color: var(--danger); }
+.chat-todo-edit-input {
+  flex: 1 1 auto;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-200);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 1px 5px;
+  min-width: 0;
+}
+/* 底部「添加任务」输入行 */
+.chat-todos-add-row {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px 8px;
+  border-top: 1px solid var(--border-soft);
+}
+.chat-todos-add-input {
+  flex: 1 1 auto;
+  font-size: var(--fs-md);
+  color: var(--text);
+  background: var(--surface-200);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 4px 8px;
+  min-width: 0;
+}
+.chat-todos-add-input::placeholder { color: var(--text-4); }
+.chat-todos-add-btn {
+  flex: 0 0 auto;
+  border: none;
+  background: var(--surface-200);
+  color: var(--text-2);
+  font-size: 14px;
+  font-weight: 700;
+  width: 26px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.chat-todos-add-btn:hover { background: var(--accent, #e8811a); color: #fff; }
+.chat-todos-add-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.chat-stream {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 4px 12px;
+  scroll-behavior: smooth;
+}
+/* 1.4.x 历史分页: 滚到顶部触发的"加载更早消息"提示条 */
+.chat-load-older-tip {
+  text-align: center;
+  padding: 6px 0;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+/* 用户案例: 对话保存失败横幅——不自动消失, 数据风险提示要用户主动点掉才算看到过。 */
+.chat-persist-error-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #4a1f1f;
+  color: #ffd9d9;
+  font-size: var(--fs-md);
+  border-bottom: 1px solid #7a2b2b;
+}
+.chat-persist-error-bar button {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid #ffd9d9;
+  background: transparent;
+  color: #ffd9d9;
+  cursor: pointer;
+}
+.chat-persist-error-bar button:hover { background: rgba(255,255,255,0.1); }
+
+/* 附加远程会话 chip (composer 顶部) + 🖥 按钮激活态
+   1.5.5 多台附加: .chat-remote-chip 从"一个 chip"变成"横排容器"(不再自带边框/底色),
+   每台的视觉挪到 .chat-remote-one; 挂多台时自动换行, 不把输入框顶变形。 */
+.chat-remote-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+.chat-remote-one {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--overlay-6, rgba(120,160,255,0.35));
+  border-radius: 8px;
+  background: rgba(90, 130, 240, 0.10);
+  max-width: 100%;
+}
+.chat-remote-chip-x {
+  margin-left: 6px;
+  cursor: pointer;
+  opacity: 0.7;
+  padding: 0 4px;
+}
+.chat-remote-chip-x:hover { opacity: 1; }
+/* 🖥 与 📎 同为 .btn.icon 绝对定位(left:6px)会叠在一起盖住 📎 — 🖥 右移一档 */
+.chat-input-box #chat-remote-attach { left: 42px; }
+#chat-remote-attach.active { color: #6f9bff; }
+
+/* 消息「引用」按钮: 默认隐藏, hover 该条 turn 才显 */
+.chat-quote-btn {
+  margin-left: 8px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px solid var(--overlay-4);
+  border-radius: 8px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.chat-turn:hover .chat-quote-btn { opacity: 1; }
+.chat-quote-btn:hover { color: var(--accent, #e8811a); border-color: var(--accent, #e8811a); }
+/* 引用条(composer 上方) */
+.chat-quote-tray {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--overlay-4);
+  background: var(--overlay-2);
+}
+.chat-quote-label { font-size: var(--fs-sm); color: var(--text-3); font-weight: 600; }
+.chat-quote-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 260px;
+  padding: 2px 8px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  background: var(--bg);
+  border: 1px solid var(--overlay-4);
+  border-radius: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-quote-x { cursor: pointer; opacity: 0.6; font-weight: bold; }
+.chat-quote-x:hover { opacity: 1; color: #e05555; }
+.chat-quote-clear { cursor: pointer; font-size: var(--fs-sm); color: var(--text-3); margin-left: 4px; }
+.chat-quote-clear:hover { color: #e05555; }
+.chat-empty {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-3);
+}
+.chat-empty-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.6; }
+.chat-empty h3 { margin: 0 0 12px; font-weight: 500; font-size: 18px; color: var(--text); }
+.chat-empty p { font-size: var(--fs-md); line-height: 2; }
+.chat-suggest {
+  display: inline-block;
+  margin: 4px 4px;
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-100);
+  border: 1px solid var(--border-soft);
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: var(--fs-md);
+  transition: border-color 0.15s, color 0.15s;
+}
+.chat-suggest:hover { color: var(--text); border-color: var(--brand); }
+
+.chat-onboarding {
+  list-style: none;
+  padding: 0;
+  margin: 16px auto 0;
+  max-width: 820px;
+  text-align: left;
+  counter-reset: pillar;
+  /* 0.3.18: 2x2 grid 横排，省竖向空间。窄窗口 (<560px) 自动回单列。 */
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+.chat-onboarding > li {
+  position: relative;
+  padding: 12px 16px 12px 44px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md, 8px);
+  background: var(--surface-50, transparent);
+  counter-increment: pillar;
+}
+.chat-onboarding > li::before {
+  content: counter(pillar);
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: #fff;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.chat-onboarding > li > strong {
+  display: block;
+  color: var(--text);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.chat-onboarding > li > span {
+  display: block;
+  color: var(--text-3);
+  font-size: var(--fs-md);
+  line-height: 1.6;
+}
+.chat-onboarding > li > .chat-suggest {
+  margin-top: 6px;
+  margin-left: 0;
+  font-size: var(--fs-md);
+  padding: 3px 10px;
+}
+.chat-onboarding-hint {
+  margin-top: 14px;
+  font-size: var(--fs-sm);
+  color: var(--text-4, var(--text-3));
+}
+
+.chat-turn { margin-bottom: 12px; display: flex; }
+.chat-turn.user { justify-content: flex-end; }
+.chat-turn.assistant { justify-content: flex-start; }
+/* 「隐藏通知消息」勾选: 隐藏系统注入的通知类气泡(护航告警/定时汇报/绑定授权等) */
+.chat-stream.hide-system-notes .chat-turn.system-note { display: none; }
+.chat-bubble {
+  max-width: 80%;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  background: var(--surface-100);
+  border: 1px solid var(--border-soft);
+  font-size: 13.5px;
+  line-height: 1.65;
+  box-shadow: var(--ring);
+}
+.chat-turn.user .chat-bubble {
+  background: var(--brand-soft);
+  border-color: rgba(255, 99, 99, 0.3);
+  color: var(--text);
+}
+.chat-bubble.error {
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.08);
+}
+.chat-role {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs); letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-4);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chat-ts {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+  opacity: 0.6;
+  font-weight: normal;
+  text-transform: none;
+  letter-spacing: 0;
+}
+/* 0.3.88: 改成 overlay 变量 — 之前用硬编码 rgba(0,0,0,0.4)，白色主题下
+   变成 40% 灰底 + 深色文字（继承自 var(--text) = #1a1d24）= 低对比看不清。
+   overlay-4 在两个主题都是「轻微对比」(8%)，code 文字（var(--text)）保持
+   theme-aware → 在白底/黑底都清晰。color 显式 inherit 防止后续 prose 样式覆盖。 */
+.chat-content code,
+.chat-content .md-icode {
+  background: var(--overlay-4);
+  color: inherit;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: var(--fs-md);
+  font-family: var(--font-mono);
+}
+.chat-content pre.code,
+.chat-content pre.md-code {
+  background: var(--overlay-3);
+  color: inherit;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin: 8px 0;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+}
+.chat-content pre.md-code code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+}
+
+/* ---------------- Markdown elements ---------------- */
+.chat-content .md-h1,
+.chat-content .md-h2,
+.chat-content .md-h3,
+.chat-content .md-h4 {
+  margin: 16px 0 8px;
+  font-weight: 600;
+  letter-spacing: 0.1px;
+  color: var(--text);
+  line-height: 1.35;
+}
+.chat-content .md-h1 { font-size: 20px; padding-bottom: 6px; border-bottom: 1px solid var(--border-soft); }
+.chat-content .md-h2 { font-size: 17px; padding-bottom: 4px; border-bottom: 1px solid var(--border-soft); }
+.chat-content .md-h3 { font-size: 15px; }
+.chat-content .md-h4 { font-size: var(--fs-lg); color: var(--text-2); }
+
+.chat-content .md-h1:first-child,
+.chat-content .md-h2:first-child,
+.chat-content .md-h3:first-child,
+.chat-content .md-h4:first-child { margin-top: 0; }
+
+.chat-content .md-ul,
+.chat-content .md-ol {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+.chat-content .md-ul li,
+.chat-content .md-ol li {
+  margin: 2px 0;
+  line-height: 1.6;
+}
+.chat-content .md-ul { list-style: disc; }
+.chat-content .md-ol { list-style: decimal; }
+
+.chat-content .md-quote {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--brand);
+  background: rgba(255, 99, 99, 0.06);
+  color: var(--text-2);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.chat-content .md-hr {
+  border: 0;
+  height: 1px;
+  background: var(--border-soft);
+  margin: 14px 0;
+}
+
+.chat-content .md-table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: var(--fs-md);
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.chat-content .md-table th,
+.chat-content .md-table td {
+  padding: 6px 10px;
+  border: 1px solid var(--border-soft);
+}
+.chat-content .md-table th {
+  background: var(--overlay-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.chat-content .md-img {
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-soft);
+  margin: 6px 0;
+  cursor: zoom-in;
+  display: block;
+  background: rgba(0, 0, 0, 0.3);
+}
+.chat-content .md-img:hover { border-color: rgba(255, 255, 255, 0.18); }
+
+.chat-content a {
+  color: var(--info);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: rgba(85, 179, 255, 0.4);
+}
+.chat-content a:hover { text-decoration-color: var(--info); }
+
+.chat-content strong { color: var(--text); font-weight: 600; }
+.chat-content em { font-style: italic; color: var(--text-2); }
+
+/* Semantic fallback blocks emitted as literal text by some model routers.
+   These are enabled only for assistant replies by the renderer. */
+.chat-content .md-ai-section {
+  margin: 10px 0;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--overlay-1);
+  color: var(--text-2);
+  font-style: normal;
+}
+.chat-content .md-ai-section:first-child { margin-top: 0; }
+.chat-content .md-ai-section:last-child { margin-bottom: 0; }
+.chat-content .md-ai-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  color: var(--text-2);
+  font-size: var(--fs-md);
+  font-style: normal;
+  line-height: 1.4;
+}
+.chat-content details.md-ai-section > summary.md-ai-section-head {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.chat-content details.md-ai-section > summary.md-ai-section-head::-webkit-details-marker { display: none; }
+.chat-content details.md-ai-section > summary.md-ai-section-head::before {
+  content: '▶';
+  display: inline-block;
+  color: var(--text-4);
+  font-size: var(--fs-xs);
+  transition: transform 0.15s ease;
+}
+.chat-content details.md-ai-section[open] > summary.md-ai-section-head::before {
+  transform: rotate(90deg);
+}
+.chat-content .md-ai-section-icon {
+  width: 16px;
+  flex: 0 0 16px;
+  text-align: center;
+  font-weight: 700;
+}
+.chat-content .md-ai-section-title {
+  font-weight: 600;
+  letter-spacing: 0.1px;
+}
+.chat-content .md-ai-section-hint {
+  margin-left: auto;
+  color: var(--text-4);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+}
+.chat-content .md-ai-section-hint::after { content: '展开查看'; }
+.chat-content .md-ai-analysis[open] .md-ai-section-hint::after { content: '收起'; }
+.chat-content .md-ai-section-body {
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border-soft);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.chat-content .md-ai-analysis {
+  border-color: rgba(85, 179, 255, 0.24);
+  background: rgba(85, 179, 255, 0.045);
+}
+.chat-content .md-ai-analysis > .md-ai-section-head {
+  color: var(--info);
+}
+.chat-content .md-ai-summary {
+  border-color: rgba(95, 201, 146, 0.28);
+  background: rgba(95, 201, 146, 0.065);
+}
+.chat-content .md-ai-summary > .md-ai-section-head {
+  color: var(--success);
+}
+.chat-content .md-ai-summary > .md-ai-section-body { border-top-color: rgba(95, 201, 146, 0.18); }
+
+/* ---------------- Lightbox ---------------- */
+.chat-lightbox {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.88);
+  display: flex; align-items: center; justify-content: center;
+  flex-direction: column;
+  z-index: 1000;
+  cursor: zoom-out;
+  animation: lightbox-in 0.15s ease-out;
+}
+.chat-lightbox.hidden { display: none; }
+@keyframes lightbox-in { from { opacity: 0; } to { opacity: 1; } }
+.chat-lightbox-img {
+  max-width: 92vw;
+  max-height: 88vh;
+  border-radius: var(--radius);
+  box-shadow: 0 16px 60px rgba(0, 0, 0, 0.6);
+  cursor: default;
+}
+.chat-lightbox-caption {
+  margin-top: 14px;
+  color: var(--text-2);
+  font-size: var(--fs-md);
+  background: rgba(0, 0, 0, 0.6);
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
+  cursor: default;
+}
+.chat-lightbox-close {
+  position: absolute;
+  top: 18px; right: 24px;
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  background: var(--overlay-5);
+  color: var(--text);
+  border: 1px solid var(--border-soft);
+  font-size: 22px;
+  cursor: pointer;
+  line-height: 1;
+}
+.chat-lightbox-close:hover { background: rgba(255, 255, 255, 0.18); }
+.chat-content .chat-text + .chat-text { margin-top: 4px; }
+.chat-content .chat-text + .chat-tool,
+.chat-content .chat-tool + .chat-text,
+.chat-content .chat-tool + .chat-tool,
+.chat-content .chat-thinking + * { margin-top: 8px; }
+
+/* Tool-call card embedded in an assistant bubble */
+.chat-tool {
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  font-size: var(--fs-md);
+  overflow: hidden;
+}
+.chat-tool-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--text-2);
+}
+.chat-tool-icon { font-size: var(--fs-lg); line-height: 1; }
+.chat-tool-name {
+  color: var(--info);
+  font-weight: 600;
+}
+.chat-tool-arg {
+  color: var(--text-3);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-tool-status {
+  font-size: var(--fs-lg);
+  color: var(--success);
+  font-weight: 700;
+}
+.chat-tool-status.error { color: var(--danger); }
+.chat-tool-body {
+  border-top: 1px solid var(--border-soft);
+  background: rgba(0, 0, 0, 0.25);
+}
+.chat-tool-body summary {
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  user-select: none;
+  list-style: none;
+}
+.chat-tool-body summary::-webkit-details-marker { display: none; }
+.chat-tool-body summary::before {
+  content: '▸ ';
+  display: inline-block;
+  margin-right: 4px;
+  transition: transform 0.15s;
+}
+.chat-tool-body[open] summary::before { content: '▾ '; }
+.chat-tool-body[open] summary { color: var(--text-3); border-bottom: 1px solid var(--border-soft); }
+.chat-tool-input,
+.chat-tool-result-slot {
+  padding: 10px 12px;
+}
+.chat-tool-result-slot:empty { display: none; }
+.chat-tool-result-slot:not(:empty) { border-top: 1px solid var(--border-soft); }
+.chat-tool-label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.chat-tool pre.code { margin: 0; max-height: 220px; }
+
+/* Thinking block (extended-thinking blocks from Claude) */
+.chat-thinking {
+  border-left: 2px solid var(--border-soft);
+  padding: 6px 10px 6px 12px;
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-size: var(--fs-md);
+  color: var(--text-3);
+  font-style: italic;
+}
+/* 0.3.54: thinking 块包成 <details>，summary 行可点击展开 / 收起 */
+.chat-thinking-summary {
+  cursor: pointer;
+  list-style: none;          /* 自定义三角，关掉浏览器默认 */
+  font-style: normal;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+  padding: 2px 0;
+}
+.chat-thinking-summary::-webkit-details-marker { display: none; }
+.chat-thinking-summary::before {
+  content: '▶';
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+  transition: transform 0.15s ease;
+  display: inline-block;
+}
+.chat-thinking[open] > .chat-thinking-summary::before {
+  transform: rotate(90deg);
+}
+.chat-thinking[open] > .chat-thinking-body { margin-top: 6px; }
+.chat-segment-tag {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs); font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--text-4);
+  text-transform: uppercase;
+  margin-bottom: 0;
+  font-style: normal;
+}
+.chat-thinking-body { line-height: 1.55; }
+.chat-spinner {
+  display: inline-block;
+  width: 16px; height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 0.2.1: chat 底部「AI 正在工作」提示，busy 时显示，跨多个 turn segment 持续 */
+.chat-busy-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  margin: 0 0 4px;
+  background: rgba(95, 180, 255, 0.06);
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text-3);
+  font-size: var(--fs-md);
+  font-family: var(--font-mono);
+}
+.chat-busy-text { letter-spacing: 0.3px; }
+.chat-busy-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+.chat-busy-dots span {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--brand);
+  animation: chat-busy-bounce 1.2s infinite ease-in-out both;
+}
+.chat-busy-dots span:nth-child(1) { animation-delay: -0.32s; }
+.chat-busy-dots span:nth-child(2) { animation-delay: -0.16s; }
+@keyframes chat-busy-bounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40%           { transform: scale(1.0); opacity: 1; }
+}
+
+.chat-composer {
+  display: flex; flex-direction: column; gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+}
+.chat-input-row {
+  display: flex; gap: 12px; align-items: flex-end;
+}
+.chat-input-box {
+  flex: 1;
+  position: relative;
+}
+.chat-input-box textarea {
+  width: 100%;
+  resize: none;
+  min-height: 84px;
+  /* Reserve space at bottom-left for the 📎 button and bottom-right for
+     the send button so user text doesn't run under them. */
+  padding-bottom: 44px;
+  padding-right: 14px;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.chat-input-box .btn.icon {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  width: 30px;
+  height: 30px;
+  font-size: 16px;
+  border: 1px solid var(--border-soft);
+  background: transparent;
+}
+.chat-input-box .btn.icon:hover {
+  background: var(--surface-100);
+  border-color: rgba(255, 255, 255, 0.18);
+  opacity: 1;
+}
+/* Send button anchored to the bottom-right of the textarea. */
+.chat-input-box .chat-send-inside {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 6px 16px;
+  font-size: var(--fs-md);
+  border-radius: var(--radius-pill);
+}
+.chat-input-box .chat-send-inside:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Attachment chips strip above the input */
+.chat-attachments {
+  display: flex; flex-wrap: wrap; gap: 8px;
+}
+.chat-attachments.empty { display: none; }
+
+.chat-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 8px 6px 10px;
+  background: var(--surface-100);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  font-size: var(--fs-md);
+  color: var(--text-2);
+  max-width: 280px;
+}
+.chat-chip .chip-icon { font-size: var(--fs-lg); line-height: 1; }
+/* 0.2.6: chip 内的缩略图 — 比 emoji 大点，看得见图。点击放大到全屏 lightbox。 */
+.chat-chip .chat-chip-thumb {
+  display: block;
+  width: 32px; height: 32px;
+  object-fit: cover;
+  border-radius: 4px;
+  cursor: zoom-in;
+  background: var(--overlay-2);
+  border: 1px solid var(--border-soft);
+  flex-shrink: 0;
+}
+.chat-chip .chat-chip-thumb:hover {
+  border-color: var(--brand, #ff6363);
+}
+.chat-chip .chip-name {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 180px;
+}
+.chat-chip .chip-size {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+}
+.chat-chip .chip-x {
+  background: transparent; border: 0;
+  color: var(--text-4);
+  cursor: pointer;
+  font-size: 16px; line-height: 1;
+  padding: 0 2px;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+.chat-chip .chip-x:hover { color: var(--danger); background: rgba(239, 68, 68, 0.12); }
+.chat-chip-image { cursor: zoom-in; }
+.chat-chip-preview {
+  position: fixed;
+  z-index: 1000;
+  background: var(--surface-100, #1a1a1a);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 6px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  display: none;
+  max-width: 480px;
+  max-height: 360px;
+}
+.chat-chip-preview img {
+  display: block;
+  max-width: 468px;
+  max-height: 348px;
+  width: auto;
+  height: auto;
+  border-radius: 4px;
+}
+.chat-chip.in-bubble {
+  background: rgba(0, 0, 0, 0.32);
+  border-color: var(--border-soft);
+  margin-bottom: 8px;
+  margin-right: 6px;
+}
+.chat-bubble-attachments {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-bottom: 4px;
+}
+
+/* Icon-only button (📎) */
+.btn.icon {
+  width: 36px; height: 36px;
+  padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+}
+
+/* Full-pane drop overlay */
+.chat-drop-overlay {
+  position: absolute; inset: 0;
+  display: none;
+  pointer-events: none;
+  background: rgba(7, 8, 10, 0.78);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  z-index: 50;
+  align-items: center; justify-content: center;
+}
+.chat-drop-overlay.active { display: flex; }
+.chat-drop-inner {
+  border: 2px dashed var(--brand);
+  border-radius: var(--radius-lg);
+  padding: 40px 60px;
+  font-size: 18px;
+  color: var(--brand);
+  background: rgba(255, 99, 99, 0.06);
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+
+/* Make .chat-wrap a positioning context for the drop overlay */
+.chat-wrap { position: relative; }
+
+/* ---- 0.2.4: 新会话三选一对话框 + 短暂 toast 提示 ---- */
+.chat-choice-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.chat-choice-modal {
+  background: var(--bg-card, #161719);
+  border: 1px solid var(--border, #2a2c30);
+  border-radius: 12px;
+  padding: 24px;
+  width: 100%;
+  max-width: 520px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+  color: var(--text, #d8d8d8);
+}
+.chat-choice-title {
+  font-size: 17px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.chat-choice-body {
+  font-size: var(--fs-md);
+  color: var(--muted, #999);
+  margin-bottom: 18px;
+}
+.chat-choice-options {
+  display: flex; flex-direction: column; gap: 10px;
+  margin-bottom: 16px;
+}
+.chat-choice-btn {
+  text-align: left;
+  background: var(--bg-elev, #1d1f23);
+  border: 1px solid var(--border, #2a2c30);
+  border-radius: 10px;
+  padding: 14px 16px;
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.chat-choice-btn:hover {
+  background: var(--bg-elev-hover, #24262b);
+  border-color: var(--brand, #ff6363);
+}
+.chat-choice-btn:focus-visible {
+  outline: 2px solid var(--brand, #ff6363);
+  outline-offset: 2px;
+}
+.chat-choice-btn.primary {
+  border-color: var(--brand, #ff6363);
+  background: rgba(255, 99, 99, 0.06);
+}
+.chat-choice-btn-title {
+  font-size: var(--fs-lg); font-weight: 600;
+  margin-bottom: 6px;
+  display: flex; align-items: center; gap: 8px;
+}
+.chat-choice-btn-tag {
+  font-size: var(--fs-xs);
+  background: var(--brand, #ff6363);
+  color: #fff;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+}
+.chat-choice-btn-desc {
+  font-size: var(--fs-md);
+  color: var(--muted, #999);
+  line-height: 1.5;
+}
+.chat-choice-actions {
+  display: flex; justify-content: flex-end;
+}
+
+.chat-history-modal { max-width: 680px; }
+.chat-session-history-list {
+  max-height: min(58vh, 560px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.chat-history-item.is-current {
+  opacity: 0.72;
+  cursor: default;
+}
+.chat-history-item .chat-choice-btn-title {
+  justify-content: flex-start;
+  margin-bottom: 4px;
+}
+.chat-history-meta {
+  color: var(--text-3, #888);
+  font-size: var(--fs-sm);
+  margin-bottom: 5px;
+}
+.chat-history-kind {
+  color: var(--warn, #ffbc33);
+  border: 1px solid rgba(255, 188, 51, 0.35);
+  border-radius: 8px;
+  padding: 1px 6px;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+}
+.chat-history-empty {
+  color: var(--text-3, #888);
+  text-align: center;
+  padding: 28px 12px;
+}
+
+/* 0.3.3: 「新会话」对话框里的当前 TodoWrite 待办列表 */
+.chat-choice-todos {
+  background: rgba(255, 188, 51, 0.06);
+  border: 1px solid rgba(255, 188, 51, 0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: var(--fs-md);
+}
+.chat-choice-todos-head {
+  color: var(--warn, #ffbc33);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.chat-choice-todos ul {
+  list-style: none;
+  margin: 0; padding: 0;
+}
+.chat-choice-todos li {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 3px 0;
+  color: var(--text-2, #b8b8b8);
+  line-height: 1.45;
+}
+.chat-choice-todo-status { flex-shrink: 0; font-size: var(--fs-sm); }
+.chat-choice-todo-status.status-in_progress { color: var(--accent, #4a9eff); }
+.chat-choice-todo-status.status-pending { color: var(--text-3, #888); }
+.chat-choice-todo-text { flex: 1; word-break: break-all; }
+.chat-choice-todo-more {
+  color: var(--text-3, #888);
+  font-size: var(--fs-sm);
+  font-style: italic;
+  padding-left: 18px;
+}
+.chat-choice-warn {
+  color: var(--brand, #ff6363);
+  font-weight: 500;
+}
+
+.chat-toast {
+  position: absolute;
+  bottom: 80px; left: 50%;
+  transform: translateX(-50%);
+  background: rgba(28, 168, 92, 0.92);
+  color: #fff;
+  padding: 10px 18px;
+  border-radius: 999px;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  z-index: 60;
+  animation: chat-toast-in 0.18s ease-out;
+}
+@keyframes chat-toast-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ---------------- Tutorials ---------------- */
+.tut-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+.tut-card {
+  background: var(--surface-100);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  transition: border-color 0.2s, transform 0.2s;
+  text-decoration: none;
+  color: var(--text);
+  cursor: pointer;
+  box-shadow: var(--ring);
+}
+.tut-card:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  transform: translateY(-2px);
+}
+.tut-cover {
+  aspect-ratio: 16/9;
+  background-size: cover; background-position: center;
+  position: relative;
+  background-color: #131415;
+}
+.tut-cover-empty {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 48px;
+  color: var(--text-4);
+}
+.tut-duration {
+  position: absolute;
+  bottom: 8px; right: 8px;
+  background: rgba(7, 8, 10, 0.85);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.tut-body { padding: 14px 16px 16px; }
+.tut-meta {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.tut-plat, .tut-diff, .tut-tag {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs); font-weight: 600;
+  letter-spacing: 0.4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+.tut-tag { background: var(--overlay-2); color: var(--text-3); }
+.pl-douyin { background: rgba(254, 44, 85, 0.15); color: #fe2c55; }
+.pl-wechat { background: rgba(7, 193, 96, 0.15);  color: #07c160; }
+.pl-bili   { background: rgba(0, 174, 236, 0.15); color: #00aeec; }
+.pl-xhs    { background: rgba(255, 36, 66, 0.15); color: #ff2442; }
+.pl-yt     { background: rgba(255, 0, 0, 0.15);   color: #ff4444; }
+.pl-other  { background: var(--surface-200); color: var(--text-3); }
+.df-entry  { background: rgba(95, 201, 146, 0.12); color: var(--success); }
+.df-mid    { background: rgba(85, 179, 255, 0.15); color: var(--info); }
+.df-pro    { background: rgba(255, 188, 51, 0.15); color: var(--warn); }
+.tut-card h3 {
+  font-size: 15px; font-weight: 500;
+  margin: 0 0 8px;
+  line-height: 1.4;
+}
+.tut-card p {
+  font-size: var(--fs-md); color: var(--text-3);
+  line-height: 1.55;
+  margin: 0 0 12px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.tut-foot {
+  display: flex; justify-content: space-between;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+/* ---------------- News ---------------- */
+.news-card {
+  background: var(--surface-100);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: 20px 22px;
+  margin-bottom: 14px;
+  box-shadow: var(--ring);
+}
+.news-card.news-pinned { border-color: rgba(255, 99, 99, 0.35); }
+.news-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.news-head h3 {
+  margin: 0;
+  font-size: 16px; font-weight: 500;
+  flex: 1;
+}
+.news-pin {
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs); font-weight: 600;
+  letter-spacing: 0.4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+.news-kind {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs); font-weight: 600;
+  letter-spacing: 0.4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+.nk-news   { background: rgba(85, 179, 255, 0.15); color: var(--info); }
+.nk-update { background: rgba(95, 201, 146, 0.15); color: var(--success); }
+.nk-event  { background: rgba(168, 85, 247, 0.15); color: #c084fc; }
+.nk-warn   { background: rgba(255, 188, 51, 0.15); color: var(--warn); }
+.news-date {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-4);
+}
+.news-body {
+  font-size: 13.5px; line-height: 1.65;
+  color: var(--text-2);
+}
+.news-body p { margin: 0 0 10px; }
+.news-body p:last-child { margin-bottom: 0; }
+.news-body code { background: rgba(0,0,0,0.4); padding: 1px 6px; border-radius: 4px; font-size: var(--fs-md); }
+.news-body a { color: var(--info); }
+.news-foot {
+  margin-top: 12px;
+  font-size: var(--fs-sm); color: var(--text-4);
+  font-family: var(--font-mono);
+}
+
+/* ---------------- Strategy marketplace ---------------- */
+.market-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+.market-card {
+  background: var(--surface-100);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+  box-shadow: var(--ring);
+  transition: border-color 0.2s;
+}
+.market-card:hover { border-color: rgba(255, 255, 255, 0.16); }
+.market-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 8px; gap: 12px;
+}
+.market-head h3 {
+  margin: 0;
+  font-size: 16px; font-weight: 500;
+}
+.market-author {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-4);
+}
+.market-summary {
+  font-size: var(--fs-md);
+  color: var(--text-3);
+  line-height: 1.55;
+  margin: 0 0 14px;
+  min-height: 38px;
+}
+.market-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 14px;
+  padding: 12px 14px;
+  background: var(--overlay-2);          /* 0.3.183: theme-aware (light: rgba(0,0,0,0.04) / dark: rgba(255,255,255,0.04)) */
+  border: 1px solid var(--border-soft);  /* 给 light mode 加细边框, 不然背景太淡跟卡片融合 */
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+}
+.market-stats > div { display: flex; justify-content: space-between; align-items: baseline; }
+.market-stats .k {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-4);
+  letter-spacing: 0.3px;
+}
+.market-stats .v {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  color: var(--text);
+  font-weight: 500;
+}
+.market-foot {
+  display: flex; justify-content: space-between; align-items: center;
+}
+.market-meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+/* ---------------- Backtest account bootstrap card ---------------- */
+.bt-acct-instructions {
+  margin-top: 14px;
+  padding: 12px 16px;
+  background: rgba(85, 179, 255, 0.06);
+  border: 1px solid rgba(85, 179, 255, 0.22);
+  border-radius: var(--radius);
+  font-size: var(--fs-md);
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+/* ---------------- 通用按钮右上角角标 ---------------- */
+/* 用法：button 加 .bt-btn（旧名保留），里面塞 <span class="bt-badge">…</span>。
+   未读数（蓝）走默认；缺失警告（红）加 .bt-badge-danger 修饰。
+   位置统一在右上角 — 之前在左上，跟 macOS dock 习惯不一致，改右上更直觉。 */
+.bt-btn { position: relative; }
+.bt-badge {
+  position: absolute;
+  top: -6px; right: -6px;
+  min-width: 16px; height: 16px;
+  padding: 0 4px;
+  background: var(--brand);
+  color: white;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  border-radius: 8px;
+  box-shadow: 0 0 0 2px var(--bg);
+  font-family: var(--font-mono);
+}
+.bt-badge-danger {
+  background: var(--danger, #e89876);
+}
+
+/* 通讯左侧会话行的新消息红点。它必须留在普通文档流中，紧邻联系人菜单；
+   不使用通用 `.bt-badge` 的 absolute 定位，避免红点跑出用户框。 */
+.im-unread-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border-radius: 50%;
+  background: #e5484d;
+  box-shadow: 0 0 0 2px var(--surface-100, var(--bg));
+}
+
+.bt-list { display: flex; flex-direction: column; gap: 8px; }
+
+.bt-item {
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+/* 0.3.103: 白色主题下 bt-item bg 不能继续用「黑色 32% 蒙版」(等于 #adadad 灰底)，
+   叠上 text-3 (#6a7080) 跟 text-4 (#9ca3ad) 的字直接糊一片看不清。改成跟
+   .card 同款的 surface-100 (#f5f6f8) 浅灰白底，让 chip / 时间戳 / metric labels
+   都有正常对比度。border 也改深一档 让卡片轮廓更明确。 */
+:root[data-theme="light"] .bt-item {
+  background: var(--surface-100);
+  border-color: var(--border);
+}
+:root[data-theme="light"] .bt-item-time,
+:root[data-theme="light"] .bt-item-elapsed,
+:root[data-theme="light"] .bt-cell .k {
+  /* text-4 (#9ca3ad) 在 surface-100 上稍淡，挪到 text-3 (#6a7080) 提一档 */
+  color: var(--text-3);
+}
+.bt-item-head {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 8px;
+  font-size: var(--fs-md);
+  color: var(--text-3);
+}
+.bt-item-symbol code { background: transparent; color: var(--text); font-size: var(--fs-md); padding: 0; }
+.bt-item-range, .bt-item-time, .bt-item-elapsed { font-family: var(--font-mono); }
+.bt-item-time { color: var(--text-4); }
+.bt-item-elapsed { color: var(--text-4); margin-left: auto; }
+/* 0.3.113: 头部「源码版本 + 还原」chip — 跟「耗时」「✕」并排显示在 bt-item-head 右侧 */
+.bt-head-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  background: var(--overlay-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-pill);
+  color: var(--text-3);
+  cursor: pointer;
+  user-select: none;
+}
+.bt-head-chip:hover { background: var(--overlay-3); }
+.bt-head-chip code { background: transparent; padding: 0; color: var(--text-2); }
+
+.bt-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px 16px;
+}
+.bt-cell { display: flex; flex-direction: column; gap: 2px; }
+.bt-cell .k {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+.bt-cell .v {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+.bt-cell .v.bt-v-pos { color: var(--success); }
+.bt-cell .v.bt-v-neg { color: var(--danger); }
+
+/* Token tab — mode picker cards */
+.tk-modes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+.tk-mode-card {
+  display: flex;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-soft, #2a2a2a);
+  border-radius: 8px;
+  background: var(--overlay-1);
+  cursor: pointer;
+  transition: all 0.15s;
+  align-items: flex-start;
+}
+.tk-mode-card:hover { background: var(--overlay-2); }
+.tk-mode-card.on {
+  border-color: var(--accent, #4a9eff);
+  background: rgba(74,158,255,0.08);
+}
+.tk-mode-card input[type="radio"] {
+  margin-top: 3px;
+  accent-color: var(--accent, #4a9eff);
+}
+.tk-mode-title {
+  font-size: var(--fs-lg);
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.tk-mode-desc {
+  font-size: var(--fs-md);
+  line-height: 1.6;
+  color: var(--text-3);
+}
+/* @-mention strategy picker (chat input) — floating dropdown */
+.mention-popup {
+  position: fixed;
+  z-index: 1000;
+  background: var(--bg-elev, #1f1f1f);
+  border: 1px solid var(--border-soft, #333);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  font-size: var(--fs-md);
+}
+.mention-empty {
+  padding: 12px 16px;
+  color: var(--text-4);
+  font-style: italic;
+  text-align: center;
+}
+.mention-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-2);
+}
+.mention-item:hover, .mention-item.on {
+  background: var(--overlay-3);
+  color: var(--text);
+}
+.mention-name {
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+.mention-tag {
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  color: var(--text-4);
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--overlay-2);
+  white-space: nowrap;
+}
+.mention-tag.mention-mounted {
+  color: #6fd17e;
+  background: rgba(111,209,126,0.10);
+}
+
+/* Notify channel chips on timer rows — shows "this task pushes to chat/wechat" */
+.notify-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  background: var(--overlay-2);
+  color: var(--text-3);
+  margin-right: 3px;
+}
+.notify-chip.notify-chat { color: #66b6ff; background: rgba(102,182,255,0.10); }
+.notify-chip.notify-wechat { color: #6fd17e; background: rgba(111,209,126,0.10); }
+.notify-chip.notify-silent { color: var(--text-4); }
+
+/* Last-run summary peek under timer task name */
+.last-sum-peek {
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: rgba(255,255,255,0.025);
+  border-left: 2px solid var(--border-soft);
+  border-radius: 2px;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  max-height: 36px;
+  overflow: hidden;
+}
+
+/* Backtest parameter chip — small inline tag showing input_overrides */
+.bt-param-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  background: var(--bg-soft, var(--overlay-2));
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+.bt-param-chip code {
+  color: var(--text-2);
+  background: transparent;
+  padding: 0;
+}
+
+/* Help icon next to backtest metric labels — click for explanation popup */
+.bt-help {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: var(--fs-sm);
+  color: var(--text-4);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s;
+  vertical-align: 1px;
+}
+.bt-help:hover {
+  color: var(--accent, #4a9eff);
+}
+
+.bt-error {
+  font-size: var(--fs-md);
+  color: var(--warn);
+  background: rgba(255, 188, 51, 0.06);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+}
+
+/* ---------------- Strategy doc panel ---------------- */
+.strategy-doc-preview {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  font-size: var(--fs-md);
+  line-height: 1.65;
+  color: var(--text-2);
+  max-height: 480px;
+  overflow-y: auto;
+}
+.strategy-doc-preview h1,
+.strategy-doc-preview h2,
+.strategy-doc-preview h3,
+.strategy-doc-preview h4 { color: var(--text); margin-top: 12px; margin-bottom: 6px; }
+.strategy-doc-preview h1:first-child,
+.strategy-doc-preview h2:first-child { margin-top: 0; }
+.strategy-doc-preview ul, .strategy-doc-preview ol { padding-left: 22px; margin: 6px 0; }
+/* 0.3.88: 改 theme-aware overlay（同 chat-content 修法） */
+.strategy-doc-preview code { background: var(--overlay-4); color: inherit; padding: 1px 6px; border-radius: 4px; font-size: var(--fs-md); }
+.strategy-doc-preview pre { background: var(--overlay-3); color: inherit; padding: 10px 12px; border-radius: 6px; overflow-x: auto; font-size: var(--fs-md); }
+
+.strategy-doc-editor {
+  width: 100%;
+  min-height: 320px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  resize: vertical;
+}
+.strategy-doc-editor:focus { border-color: rgba(255, 255, 255, 0.22); outline: none; }
+
+/* ---------------- Skills tab ---------------- */
+.skills-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+.skills-hero > div:first-child { flex: 1; min-width: 0; }
+.skills-hero-hint {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 16px;
+  background: var(--surface-100);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  max-width: 360px;
+  flex-shrink: 0;
+  box-shadow: var(--ring);
+}
+.skills-hero-hint-icon { font-size: 22px; line-height: 1; padding-top: 2px; }
+.skills-hero-hint-title {
+  font-weight: 500;
+  color: var(--text);
+  font-size: 13.5px;
+  margin-bottom: 4px;
+}
+.skills-hero-hint-body {
+  font-size: var(--fs-md);
+  color: var(--text-3);
+  line-height: 1.55;
+}
+.skills-hero-hint-body a {
+  color: var(--brand);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(255, 99, 99, 0.45);
+}
+.skills-hero-hint-body a:hover {
+  border-bottom-color: var(--brand);
+}
+.skills-group {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+.skills-group:first-of-type { margin-top: 8px; padding-top: 0; border-top: 0; }
+.skills-group-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  min-width: 0;
+}
+.skills-group-head .skills-group-name { flex-shrink: 0; }
+.skills-group-head .skills-group-meta {
+  flex: 1;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.skills-group-name {
+  font-size: var(--fs-lg);
+  font-weight: 500;
+  color: var(--text);
+}
+.skills-group-meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-4);
+  letter-spacing: 0.3px;
+}
+.skills-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+}
+.skills-item {
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: var(--fs-md);
+}
+.skills-item-row {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.skills-item-name {
+  font-weight: 500;
+  color: var(--text);
+}
+.skills-item-id {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-4);
+  background: transparent;
+  padding: 0;
+}
+.skills-item-desc {
+  color: var(--text-3);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
+.skills-item-call {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+  margin-top: 2px;
+  letter-spacing: 0.2px;
+  word-break: break-all;
+}
+.skills-error {
+  font-size: var(--fs-md);
+  color: var(--warn);
+  background: rgba(255, 188, 51, 0.06);
+  border: 1px solid rgba(255, 188, 51, 0.28);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+}
+
+/* ---------------- Settings rows ---------------- */
+.settings-row {
+  margin-bottom: 14px;
+}
+.settings-row-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.settings-row-head label {
+  margin: 0; text-transform: none; letter-spacing: 0;
+  color: var(--text-2); font-family: inherit;
+  font-size: var(--fs-md); font-weight: 500;
+}
+.settings-hint {
+  color: var(--text-4);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  margin-left: 6px;
+}
+.settings-source {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+}
+.settings-source.set     { color: var(--brand);   background: var(--brand-soft);    border: 1px solid rgba(255, 99, 99, 0.32); }
+.settings-source.auto    { color: var(--info);    background: rgba(85, 179, 255, 0.10); border: 1px solid rgba(85, 179, 255, 0.30); }
+.settings-source.missing { color: var(--text-4);  background: transparent;          border: 1px solid var(--border-soft); }
+
+.settings-input-row {
+  display: flex; gap: 6px; align-items: stretch;
+}
+.settings-input-row input {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+}
+
+/* ---------------- Marketplace modals (buy / list / my-orders) ---------------- */
+.mkt-modal {
+  position: fixed; inset: 0;
+  z-index: 200;
+  background: rgba(7, 8, 10, 0.72);
+  backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  animation: mktFadeIn 0.16s ease-out;
+}
+@keyframes mktFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.mkt-modal-body {
+  background: var(--surface-100);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 80px rgba(0, 0, 0, 0.6), var(--ring);
+  padding: 24px;
+  width: 100%;
+  max-width: 560px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  animation: mktSlideUp 0.18s ease-out;
+}
+@keyframes mktSlideUp {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+.mkt-modal-body h2 {
+  font-size: 17px;
+  font-weight: 500;
+}
+.mkt-modal-body .strategy-doc-preview {
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  overflow-y: auto;
+  font-size: var(--fs-md);
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
+/* ---------------- Listing eligibility checklist (上架 dialog) ---------------- */
+.list-checklist {
+  margin: 12px 0 16px;
+  padding: 12px 16px;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+}
+.list-checklist .row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-family: var(--font-mono); font-size: var(--fs-md);
+  padding: 4px 0;
+}
+.list-checklist .ok-mark    { color: var(--success); }
+.list-checklist .fail-mark  { color: var(--danger); }
+.list-checklist .row .k     { color: var(--text-3); }
+.list-checklist .row .v     { color: var(--text); }
+
+.list-file-picker {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--text-3);
+}
+.list-file-picker.picked { color: var(--text); border-color: rgba(95, 201, 146, 0.28); }
+.list-file-picker .name {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Currently-mounted strategy badge */
+.tag.mounted {
+  background: rgba(255, 99, 99, 0.14);
+  color: var(--brand);
+  border-color: rgba(255, 99, 99, 0.32);
+  font-weight: 600;
+}
+.tag.listed {
+  background: rgba(85, 179, 255, 0.10);
+  color: var(--info);
+  border-color: rgba(85, 179, 255, 0.28);
+}
+
+/* ---------------- OrderGuard stat cells ---------------- */
+.og-stat {
+  padding: 12px 14px;
+  background: var(--overlay-1);
+  border: 1px solid var(--overlay-3);
+  border-radius: 6px;
+  text-align: center;
+}
+.og-stat-v {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  color: var(--text);
+}
+.og-stat-k {
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  margin-top: 4px;
+}
+.og-mode-radio:hover {
+  background: var(--overlay-1);
+}
+
+/* ---------------- Misc ---------------- */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--surface-200);
+  border: 2px solid var(--bg);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--border); }

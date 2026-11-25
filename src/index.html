@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>EasyDeal 社区版</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://rsms.me; font-src 'self' https://rsms.me data:; connect-src 'self' https://rsms.me; img-src 'self' data: https: easydeal-asset:">
+  <link rel="preconnect" href="https://rsms.me/">
+  <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <img src="../assets/icon-32.png" class="brand-mark-img" alt="EasyDeal">
+        <span class="brand-name">EasyDeal</span>
+        <span class="brand-sub" id="brand-version">v… · 社区版</span>
+      </div>
+      <!-- 0.3.200: 移除「EA 挂载状态 pulse」— 用户反馈未来很多策略并行, 顶栏单一指示器
+           没意义且会跟「MT5 tab 显示未关联」状态文案冲突. 各 EA 的运行状态去「策略」tab
+           或「MT5」tab 卡片看. 保留 #wx-pulse (单一通道指示器还有意义). -->
+      <span id="mount-pulse" class="mount-pulse" style="display: none;" title="(已下线)" hidden>
+        <span class="mount-dot"></span>
+        <span id="mount-pulse-text">— 挂载</span>
+      </span>
+      <!-- 0.3.166: 交易权限指示 chip 从顶栏移至 Skills → MCP 工具 section，
+           减少顶栏噪音。详见 skills-view.js renderInventory() tradingChip 逻辑。 -->
+      <nav class="tabs" id="tabs">
+        <!-- 0.3.164: 顺序: AI、策略、护航、监控、跟单、排行榜、商城、教程、资讯、
+             Skills、消息、Token、设置。
+             - 「商城」恢复显示 (作者反馈「策略商城栏目不见了，如果策略上架怎么办」),
+               位置紧跟「排行榜」之后, 跟「跟单/排行榜/商城」一组.
+             - 「知识库」整段并入「Skills」tab (Skills 内 MCP 工具 ↔ AI Skills 之间渲染一段
+               「知识库」section, 跟 renderKnowledge 同款 UI), 顶部不再单独占位. -->
+        <button data-tab="chat"        class="tab-btn active">AI</button>
+        <button data-tab="mt5"         class="tab-btn">MT5</button>
+        <button data-tab="strategies"  class="tab-btn">策略</button>
+        <button data-tab="orderguard"  class="tab-btn">🛡 护航</button>
+        <button data-tab="timers"      class="tab-btn">监控</button>
+        <button data-tab="tutorials"   class="tab-btn">教程</button>
+        <button data-tab="news"        class="tab-btn">资讯</button>
+        <button data-tab="skills"      class="tab-btn">Skills</button>
+        <button data-tab="token"       class="tab-btn">Token</button>
+        <button data-tab="settings"    class="tab-btn">设置</button>
+      </nav>
+      <!-- 0.3.102: 全停按钮挪到「AI」tab 标题栏（见 chat-view.js 的 .chat-head-actions），
+           不再永远显示在 topbar。click handler 走事件委托（renderer.js bodyclick），按钮可挂任意位置。 -->
+    </div>
+  </header>
+
+  <main class="content">
+    <section id="tab-chat"        class="tab-pane"></section>
+    <section id="tab-mt5"         class="tab-pane hidden"></section>
+    <section id="tab-strategies"  class="tab-pane hidden"></section>
+    <section id="tab-orderguard"  class="tab-pane hidden"></section>
+    <section id="tab-timers"      class="tab-pane hidden"></section>
+    <section id="tab-skills"      class="tab-pane hidden"></section>
+    <section id="tab-tutorials"   class="tab-pane hidden"></section>
+    <section id="tab-news"        class="tab-pane hidden"></section>
+    <section id="tab-token"       class="tab-pane hidden"></section>
+    <section id="tab-settings"    class="tab-pane hidden"></section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- 0.3.55: 首次启动 splash — 用户反馈「黑屏很久不知道在干啥」。在 renderer
+       挂载完成前盖住整个 viewport，给个明确的「本地数据读取中…」+ 进度提示。
+       renderer.js 首屏 showTab('chat') 跑完后会 fade out + remove 这块。 -->
+  <div id="boot-splash" style="position:fixed;inset:0;z-index:10000;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--bg,#0a0a0a);color:var(--text,#e5e5e5);transition:opacity .35s ease;font-family:'Inter','Microsoft YaHei',sans-serif;">
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:18px;">
+      <img src="../assets/icon-32.png" style="width:42px;height:42px;" alt="EasyDeal">
+      <div style="font-size:24px;font-weight:600;letter-spacing:.5px;">EasyDeal</div>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;font-size:14px;color:var(--text-3,#888);">
+      <span style="display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .8s linear infinite;"></span>
+      <span id="boot-splash-msg">本地数据读取中…</span>
+    </div>
+    <div style="margin-top:8px;font-size:11px;color:var(--text-4,#555);">首次启动会慢一些（10-20 秒）— 加载策略 / 回测 / 通道 / 配置</div>
+  </div>
+
+  <!-- 0.3.54: 主题 / 字号 preload — 在 renderer 之前同步应用 data-theme / data-font-size，避免 FOUC -->
+  <script src="theme-preload.js"></script>
+  <script type="module" src="renderer.js"></script>
+</body>
+</html>
