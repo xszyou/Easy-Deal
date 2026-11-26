@@ -8,7 +8,7 @@
 
 ## 下载安装
 
-到 [Releases](https://github.com/xszyou/Easy-Deal/releases) 下载最新的 `EasyDeal-Community-x.y.z-x64-setup.exe`，双击安装即可。安装包已内置 Python 运行时和 Claude Code，不需要另外配置环境。
+到 [v0.1.0 Release](https://github.com/xszyou/Easy-Deal/releases/tag/v0.1.0) 下载 `EasyDeal-Community-0.1.0-x64-setup.exe`，双击安装即可。安装包已内置 Python 运行时和 Claude Code，不需要另外配置环境。以后新版本会继续发布在 [Releases](https://github.com/xszyou/Easy-Deal/releases)。
 
 系统要求：Windows 10 / 11（64 位），本机已安装 MT5。
 
