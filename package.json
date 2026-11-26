@@ -1,6 +1,6 @@
 {
   "name": "easydeal-community",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "EasyDeal 社区版 — 开源的单机 MT5 AI 值守客户端（Claude Code / Codex + EasyDeal MCP）",
   "main": "electron/main.js",
   "scripts": {

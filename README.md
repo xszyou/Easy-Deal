@@ -8,7 +8,7 @@
 
 ## 下载安装
 
-到 [v0.1.0 Release](https://github.com/xszyou/Easy-Deal/releases/tag/v0.1.0) 下载 `EasyDeal-Community-0.1.0-x64-setup.exe`，双击安装即可。安装包已内置 Python 运行时和 Claude Code，不需要另外配置环境。以后新版本会继续发布在 [Releases](https://github.com/xszyou/Easy-Deal/releases)。
+到 [v0.1.1 Release](https://github.com/xszyou/Easy-Deal/releases/tag/v0.1.1) 下载 `EasyDeal-Community-0.1.1-x64-setup.exe`，双击安装即可。安装包已内置 Python 运行时和 Claude Code，不需要另外配置环境。以后新版本会继续发布在 [Releases](https://github.com/xszyou/Easy-Deal/releases)。
 
 系统要求：Windows 10 / 11（64 位），本机已安装 MT5。
 
@@ -45,7 +45,7 @@ AI 对话页：
 
 ![EasyDeal 社区版策略管理页](images/screenshots/easydeal-community-strategies.png)
 
-安装后自带 **GMarket v1.082**（编译后的 `.ex5` 和策略说明），在「策略」页点「挂载」即可装进 MT5。
+安装后自带 **GMarket v1.082**（`.mq5` 源码、编译后的 `.ex5` 和策略说明），在「策略」页点「挂载」即可装进 MT5。源码可以直接阅读、修改和重新编译。
 
 内置知识库里自带 [用户手册](docs/用户手册.md) 和 [《ML4T 中文导读》](docs/ML4T中文导读.md)（Stefan Jansen《Machine Learning for Trading》第 3 版的通俗导读），AI 回答使用问题和量化研究方法问题时会参考它们。AI 可用的下单工具（开仓、平仓、改单）默认关闭，需要在设置里手动打开。
 
@@ -96,7 +96,7 @@ EA 要在 MT5 里自动下单，必须先开启算法交易。
 
 ![讲义](<images/course1/section-03-01.png>)
 
-`bundled-eas/GMarket.ex5` 也可以单独使用：点击 MT5 菜单栏的“文件”→“打开数据文件夹”，打开 `MQL5\Experts`，复制 `GMarket.ex5` 后返回 MT5 导航栏刷新专家列表，再按上面的步骤附加到图表。策略说明见 [`bundled-eas/GMarket.md`](bundled-eas/GMarket.md)。
+`bundled-eas/GMarket.mq5` 是 v1.082 源码，`bundled-eas/GMarket.ex5` 是已经编译好的版本。只想跑 EA 时，点击 MT5 菜单栏的“文件”→“打开数据文件夹”，打开 `MQL5\Experts`，复制 `GMarket.ex5` 后返回 MT5 导航栏刷新专家列表，再按上面的步骤附加到图表。想修改策略时，用 MetaEditor 打开 `GMarket.mq5`，编译后再安装生成的 `.ex5`。策略说明见 [`bundled-eas/GMarket.md`](bundled-eas/GMarket.md)。
 
 ---
 

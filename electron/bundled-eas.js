@@ -1,4 +1,4 @@
-// Community edition ships GMarket v1.082 (compiled .ex5 + strategy notes).
+// Community edition ships GMarket v1.082 (MQ5 source + compiled .ex5 + notes).
 // On first launch it is copied into <workspace>/strategies/ so it shows up on
 // the 策略 tab like any user-added strategy. The copy happens once: the marker
 // file remembers what was installed, so a user who deletes the strategy does
@@ -8,7 +8,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 
 const BUNDLED = [
-  { id: 'gmarket-1.082', files: ['GMarket.ex5', 'GMarket.md'] },
+  { id: 'gmarket-1.082', files: ['GMarket.mq5', 'GMarket.ex5', 'GMarket.md'] },
 ];
 
 async function installBundledEas({ bundledDir, workspaceDir, dataDir, log = () => {} }) {
@@ -21,15 +21,18 @@ async function installBundledEas({ bundledDir, workspaceDir, dataDir, log = () =
 
   const done = [];
   for (const ea of BUNDLED) {
-    if (installed[ea.id]) continue;
+    let added = false;
     for (const name of ea.files) {
       const src = path.join(bundledDir, name);
       const dst = path.join(strategiesDir, name);
       try { await fs.access(dst); continue; } catch {}
       await fs.copyFile(src, dst);
+      added = true;
     }
-    installed[ea.id] = new Date().toISOString();
-    done.push(ea.id);
+    if (added || !installed[ea.id]) {
+      installed[ea.id] = new Date().toISOString();
+      done.push(ea.id);
+    }
   }
   if (done.length) {
     await fs.mkdir(dataDir, { recursive: true });

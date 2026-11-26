@@ -1,6 +1,6 @@
 # GMarket v1.082 策略说明
 
-> 基于 GMarket v1.082 standalone EA 的公开行为整理。本仓库只发布编译后的 `GMarket.ex5`，不提供策略源码；EA 在 MT5 中直接安装运行，不依赖 EasyDeal 文件桥、外部 include 或第三方包。
+> 基于 GMarket v1.082 standalone EA 的公开行为整理。社区版同时提供 `GMarket.mq5` 源码和编译后的 `GMarket.ex5`；EA 在 MT5 中直接安装运行，不依赖 EasyDeal 文件桥、外部 include 或第三方包。
 
 ## 核心逻辑
 
