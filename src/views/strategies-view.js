@@ -797,7 +797,6 @@ function renderList(host, items, unread, refresh) {
           ${it.has_source && it.has_compiled ? `<span class="tag ok" title="同时拥有源码 + 编译产物">源码+ex5</span>` : ''}
           ${it.has_source && it.ex5_stale ? `<span class="tag" style="color:var(--warn);border-color:rgba(245,158,11,0.3);" title="源码 .mq5 比已编译的 .ex5 新 —— 你(或 AI)改了源码还没重新编译。点「挂载」会用新源码重新编译再部署。">⚠ 源码已改·挂载将重编</span>` : ''}
           ${it.hash_match === false ? `<span class="tag" style="color:var(--warn);border-color:rgba(245,158,11,0.3);" title="工作区 .ex5 (${(it.ex5_sha256||'').slice(0,12)}…) 与 MT5/Experts (${(it.mt5_ex5_sha256||'').slice(0,12)}…) 不一致 — 通常是 AI 改完源码 + 编译完但还没同步到 MT5/Experts/，运行中的 EA 还是旧版本.\n用右侧「挂载」按钮重新部署, 或跟 AI 说让它跑「同步 → 重启 MT5 → 重挂 EA」流程.">代码已重新编译，请重新挂载</span>` : ''}
-" data-name="${escape(it.name)}" title="已上架到策略商城（id=${listing.id}, ${escape(listing.status)}）—— 点击查看订单 / 下架">已上架（点击管理）</span>` : ''}
           ${(() => {
             // 0.3.189 Phase 2 chip → 0.3.208 native <select> 下拉.
             // 用户反馈「做个下拉选择绑定实例」比 popup picker 更直觉.
