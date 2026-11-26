@@ -35,6 +35,16 @@
 | Skills | MCP 工具清单、本机 Claude Skills、帮助文档 |
 | Token | 选择 AI 通道：本机 Claude 登录、自定义端点（Anthropic 或 OpenAI 协议）、Codex |
 
+## 客户端截图
+
+AI 对话页：
+
+![EasyDeal 社区版 AI 对话页](images/screenshots/easydeal-community-ai.png)
+
+策略管理页：
+
+![EasyDeal 社区版策略管理页](images/screenshots/easydeal-community-strategies.png)
+
 安装后自带 **GMarket v1.082**（编译后的 `.ex5` 和策略说明），在「策略」页点「挂载」即可装进 MT5。
 
 内置知识库里自带 [用户手册](docs/用户手册.md) 和 [《ML4T 中文导读》](docs/ML4T中文导读.md)（Stefan Jansen《Machine Learning for Trading》第 3 版的通俗导读），AI 回答使用问题和量化研究方法问题时会参考它们。AI 可用的下单工具（开仓、平仓、改单）默认关闭，需要在设置里手动打开。
