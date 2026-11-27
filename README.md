@@ -128,4 +128,4 @@ npm start
 
 # 许可证
 
-源代码以 [GPL-3.0](LICENSE) 发布。`bundled-eas/GMarket.ex5` 是编译后的策略文件，不附带源码。
+源代码以 [GPL-3.0](LICENSE) 发布。`bundled-eas/GMarket.mq5` 是 v1.082 策略源码，`bundled-eas/GMarket.ex5` 是对应的编译产物。
